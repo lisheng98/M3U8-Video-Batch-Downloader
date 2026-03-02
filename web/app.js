@@ -4,6 +4,9 @@ const state = {
   lastLogSeq: 0,
   defaultOutputDir: "",
   outputDirInitialized: false,
+  availableFormats: ["mp4", "mkv", "webm", "mov", "original"],
+  defaultOutputFormat: "mp4",
+  outputFormatInitialized: false,
   nameHistory: [],
   nameHistoryIndex: null,
   drag: {
@@ -19,6 +22,7 @@ const els = {
   url: document.getElementById("video-url"),
   name: document.getElementById("video-name"),
   workers: document.getElementById("workers"),
+  outputFormat: document.getElementById("output-format"),
   addBtn: document.getElementById("add-task-btn"),
   removeSelectedBtn: document.getElementById("remove-selected-btn"),
   clearFinishedBtn: document.getElementById("clear-finished-btn"),
@@ -37,6 +41,22 @@ const els = {
 function setStatus(message, isError = false) {
   els.status.textContent = message;
   els.status.classList.toggle("error", isError);
+}
+
+function titleizeFormat(value) {
+  return value === "original" ? "Original (source)" : value.toUpperCase();
+}
+
+function renderOutputFormatOptions() {
+  if (!els.outputFormat) {
+    return;
+  }
+  const options = state.availableFormats
+    .map((fmt) => `<option value="${escapeHtml(fmt)}">${escapeHtml(titleizeFormat(fmt))}</option>`)
+    .join("");
+  els.outputFormat.innerHTML = options;
+  const selected = state.defaultOutputFormat || "mp4";
+  els.outputFormat.value = state.availableFormats.includes(selected) ? selected : state.availableFormats[0];
 }
 
 function hasStartableTasks() {
@@ -212,6 +232,16 @@ async function refreshState() {
       }
       state.outputDirInitialized = true;
     }
+    if (Array.isArray(data.output_formats) && data.output_formats.length > 0) {
+      state.availableFormats = data.output_formats;
+    }
+    if (typeof data.default_output_format === "string" && data.default_output_format) {
+      state.defaultOutputFormat = data.default_output_format;
+    }
+    if (!state.outputFormatInitialized || !els.outputFormat.value) {
+      renderOutputFormatOptions();
+      state.outputFormatInitialized = true;
+    }
     state.tasks = data.tasks || [];
     keepSelectionValid();
     renderTable();
@@ -269,12 +299,13 @@ async function addTask() {
 async function startDownloads() {
   const outputDir = els.outputDir.value.trim() || state.defaultOutputDir;
   const workers = Number(els.workers.value || 4);
+  const outputFormat = (els.outputFormat.value || state.defaultOutputFormat || "mp4").toLowerCase();
   if (!hasStartableTasks()) {
     setStatus("No queued downloads found.");
     return;
   }
   try {
-    const data = await api("/api/start", "POST", { output_dir: outputDir, workers });
+    const data = await api("/api/start", "POST", { output_dir: outputDir, workers, output_format: outputFormat });
     if ((data.started || 0) > 0) {
       setStatus(`Started ${data.started} download(s).`);
     } else {

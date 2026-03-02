@@ -8,17 +8,18 @@ Batch download `.m3u8` links with `yt-dlp` using either:
 
 - Queue multiple links with custom output names
 - Run downloads in parallel (1 to 16 workers)
+- Choose output format (`mp4`, `mkv`, `webm`, `mov`, or `original`)
 - Edit/remove queued items
 - Stop running tasks
 - Stream live logs
-- Merge output to `.mp4` when supported
+- Optional container remux to selected format when supported
 
 ## Requirements
 
 - macOS
 - Python 3
 - `yt-dlp`
-- `ffmpeg` (required by `yt-dlp` for merging to mp4)
+- `ffmpeg` (required by `yt-dlp` for merging/remuxing)
 
 Install dependencies (Homebrew):
 
@@ -50,13 +51,13 @@ python3 yt_dlp_batch_gui.py
 
 1. Set output folder (default is `~/Downloads`).
 2. Add `Link (.m3u8)` and `Video name`.
-3. Choose `Parallel downloads`.
+3. Choose `Parallel downloads` and `Output format`.
 4. Click `Start downloads`.
 
 Equivalent command per task:
 
 ```bash
-yt-dlp "LINK" -o "VIDEO_NAME.%(ext)s" --merge-output-format mp4
+yt-dlp "LINK" -o "VIDEO_NAME.%(ext)s" --merge-output-format FORMAT --remux-video FORMAT
 ```
 
 ## Privacy and safety notes

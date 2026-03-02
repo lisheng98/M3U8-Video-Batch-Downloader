@@ -226,7 +226,7 @@ body::before {
 
 .row.grid {
   display: grid;
-  grid-template-columns: minmax(220px, 1fr) minmax(190px, 290px) 122px;
+  grid-template-columns: minmax(220px, 1fr) minmax(180px, 260px) 170px 122px;
   gap: 10px;
   margin-top: 10px;
 }
@@ -241,7 +241,8 @@ label {
   margin-bottom: 6px;
 }
 
-input {
+input,
+select {
   width: 100%;
   border: 1px solid var(--line);
   border-radius: 10px;
@@ -252,7 +253,8 @@ input {
   transition: border-color 140ms ease, box-shadow 140ms ease, background-color 140ms ease;
 }
 
-input:focus {
+input:focus,
+select:focus {
   outline: none;
   border-color: #b48d55;
   background: #fffdf8;
@@ -311,8 +313,10 @@ button.primary:hover:not(:disabled) {
   align-items: end;
 }
 
-.toolbar > div:first-child {
-  min-width: 170px;
+.toolbar-settings {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: 170px;
 }
 
 .toolbar-actions {
@@ -502,6 +506,10 @@ pre#logs {
   .toolbar {
     flex-direction: column;
     align-items: stretch;
+  }
+
+  .toolbar-settings {
+    grid-template-columns: 1fr;
   }
 
   .toolbar-actions {

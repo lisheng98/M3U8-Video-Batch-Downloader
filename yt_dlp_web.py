@@ -20,6 +20,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+SUPPORTED_OUTPUT_FORMATS = ("mp4", "mkv", "webm", "mov", "original")
+DEFAULT_OUTPUT_FORMAT = "mp4"
+NORMALIZED_EXTENSIONS = {"mp4", "mkv", "webm", "mov", "avi", "flv", "m4v"}
+
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -27,9 +31,20 @@ def utc_now_iso() -> str:
 
 def normalize_name(raw_name: str) -> str:
     name = raw_name.strip()
-    if name.lower().endswith(".mp4"):
-        name = name[:-4]
+    suffix = Path(name).suffix.lower().lstrip(".")
+    if suffix in NORMALIZED_EXTENSIONS:
+        name = name[: -(len(suffix) + 1)]
     return name.strip()
+
+
+def normalize_output_format(raw_format: str | None) -> str:
+    value = str(raw_format or "").strip().lower()
+    if not value:
+        return DEFAULT_OUTPUT_FORMAT
+    if value not in SUPPORTED_OUTPUT_FORMATS:
+        allowed = ", ".join(SUPPORTED_OUTPUT_FORMATS)
+        raise ValueError(f"Invalid output format '{value}'. Allowed: {allowed}.")
+    return value
 
 
 @dataclass
@@ -89,6 +104,8 @@ class DownloadManager:
             "running": running,
             "yt_dlp_found": shutil.which("yt-dlp") is not None,
             "default_output_dir": DEFAULT_OUTPUT_DIR,
+            "output_formats": list(SUPPORTED_OUTPUT_FORMATS),
+            "default_output_format": DEFAULT_OUTPUT_FORMAT,
         }
 
     def logs_since(self, since_seq: int) -> dict:
@@ -171,13 +188,14 @@ class DownloadManager:
             self.logs = []
             self.log_seq = 0
 
-    def start_downloads(self, output_dir: str, workers: int) -> int:
+    def start_downloads(self, output_dir: str, workers: int, output_format: str) -> int:
         if shutil.which("yt-dlp") is None:
             raise RuntimeError("yt-dlp not found. Install it first (example: brew install yt-dlp).")
 
         workers = max(1, min(16, int(workers)))
         out_dir = Path(output_dir).expanduser().resolve()
         out_dir.mkdir(parents=True, exist_ok=True)
+        chosen_format = normalize_output_format(output_format)
 
         with self.lock:
             if self.running:
@@ -195,7 +213,9 @@ class DownloadManager:
             self.running = True
             self.active_run = set(pending)
             self.executor = ThreadPoolExecutor(max_workers=workers)
-            self._log_locked(f"Starting {len(pending)} download(s) with {workers} parallel worker(s).\n")
+            self._log_locked(
+                f"Starting {len(pending)} download(s) with {workers} parallel worker(s), output format: {chosen_format}.\n"
+            )
 
             for task_id in pending:
                 task = self.tasks.get(task_id)
@@ -204,12 +224,12 @@ class DownloadManager:
                 task.status = "Running"
                 task.updated_at = utc_now_iso()
                 self.cancel_requested.discard(task_id)
-                future = self.executor.submit(self._run_one, task_id, out_dir)
+                future = self.executor.submit(self._run_one, task_id, out_dir, chosen_format)
                 self.futures[task_id] = future
 
             return len(pending)
 
-    def _run_one(self, task_id: str, output_dir: Path) -> None:
+    def _run_one(self, task_id: str, output_dir: Path, output_format: str) -> None:
         final_status = "Failed"
         proc: subprocess.Popen | None = None
 
@@ -237,9 +257,9 @@ class DownloadManager:
             url,
             "-o",
             output_template,
-            "--merge-output-format",
-            "mp4",
         ]
+        if output_format != "original":
+            cmd.extend(["--merge-output-format", output_format, "--remux-video", output_format])
         cmd_text = " ".join(shlex.quote(part) for part in cmd)
         self.log(f"\n[{name}] {cmd_text}\n")
 
@@ -403,7 +423,8 @@ class AppHandler(BaseHTTPRequestHandler):
             if path == "/api/start":
                 output_dir = str(payload.get("output_dir", "")).strip() or DEFAULT_OUTPUT_DIR
                 workers = int(payload.get("workers", min(4, os.cpu_count() or 4)))
-                count = MANAGER.start_downloads(output_dir=output_dir, workers=workers)
+                output_format = normalize_output_format(payload.get("output_format"))
+                count = MANAGER.start_downloads(output_dir=output_dir, workers=workers, output_format=output_format)
                 self._send_json({"started": count})
                 return
             if path == "/api/stop-all":

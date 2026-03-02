@@ -14,6 +14,10 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
+SUPPORTED_OUTPUT_FORMATS = ("mp4", "mkv", "webm", "mov", "original")
+DEFAULT_OUTPUT_FORMAT = "mp4"
+NORMALIZED_EXTENSIONS = {"mp4", "mkv", "webm", "mov", "avi", "flv", "m4v"}
+
 
 class YtDlpBatchApp:
     def __init__(self, root: tk.Tk) -> None:
@@ -24,6 +28,7 @@ class YtDlpBatchApp:
         self.default_output_dir = str(Path.home() / "Downloads")
         self.output_dir_var = tk.StringVar(value=self.default_output_dir)
         self.workers_var = tk.IntVar(value=min(4, os.cpu_count() or 4))
+        self.output_format_var = tk.StringVar(value=DEFAULT_OUTPUT_FORMAT)
         self.url_var = tk.StringVar()
         self.name_var = tk.StringVar()
         self.name_history: list[str] = []
@@ -120,6 +125,14 @@ class YtDlpBatchApp:
         ttk.Spinbox(controls, from_=1, to=16, textvariable=self.workers_var, width=5).pack(
             side=tk.LEFT, padx=(8, 18)
         )
+        ttk.Label(controls, text="Output format:").pack(side=tk.LEFT)
+        ttk.Combobox(
+            controls,
+            textvariable=self.output_format_var,
+            values=SUPPORTED_OUTPUT_FORMATS,
+            state="readonly",
+            width=10,
+        ).pack(side=tk.LEFT, padx=(8, 18))
         ttk.Button(controls, text="Remove selected", command=self._remove_selected).pack(side=tk.LEFT)
         ttk.Button(controls, text="Clear done/failed", command=self._clear_finished).pack(
             side=tk.LEFT, padx=8
@@ -141,9 +154,16 @@ class YtDlpBatchApp:
         if not name:
             return ""
         # Store names as stems; yt-dlp controls final extension.
-        if name.lower().endswith(".mp4"):
-            name = name[:-4]
+        suffix = Path(name).suffix.lower().lstrip(".")
+        if suffix in NORMALIZED_EXTENSIONS:
+            name = name[: -(len(suffix) + 1)]
         return name.strip()
+
+    def _normalize_output_format(self, raw_value: str) -> str:
+        value = raw_value.strip().lower()
+        if value in SUPPORTED_OUTPUT_FORMATS:
+            return value
+        return DEFAULT_OUTPUT_FORMAT
 
     def _add_task(self) -> None:
         url = self.url_var.get().strip()
@@ -385,10 +405,13 @@ class YtDlpBatchApp:
             return
 
         workers = max(1, min(16, int(self.workers_var.get())))
+        output_format = self._normalize_output_format(self.output_format_var.get())
         self.remaining = len(pending)
         self.active_items = set(pending)
         self.start_btn.config(state=tk.DISABLED)
-        self._append_log(f"Starting {self.remaining} download(s) with {workers} parallel worker(s).\n")
+        self._append_log(
+            f"Starting {self.remaining} download(s) with {workers} parallel worker(s), output format: {output_format}.\n"
+        )
 
         self.executor = ThreadPoolExecutor(max_workers=workers)
         for item in pending:
@@ -397,11 +420,11 @@ class YtDlpBatchApp:
             self.table.set(item, "status", "Running")
             with self.process_lock:
                 self.cancel_requested.discard(item)
-            future = self.executor.submit(self._download_one, item, url, name, output_dir)
+            future = self.executor.submit(self._download_one, item, url, name, output_dir, output_format)
             with self.process_lock:
                 self.futures[item] = future
 
-    def _download_one(self, item: str, url: str, name: str, output_dir: Path) -> None:
+    def _download_one(self, item: str, url: str, name: str, output_dir: Path, output_format: str) -> None:
         with self.process_lock:
             if item in self.cancel_requested:
                 self.events.put({"type": "status", "item": item, "status": "Cancelled"})
@@ -413,9 +436,9 @@ class YtDlpBatchApp:
             url,
             "-o",
             output_template,
-            "--merge-output-format",
-            "mp4",
         ]
+        if output_format != "original":
+            cmd.extend(["--merge-output-format", output_format, "--remux-video", output_format])
         cmd_text = " ".join(shlex.quote(part) for part in cmd)
         self.events.put({"type": "log", "text": f"\n[{name}] {cmd_text}\n"})
 

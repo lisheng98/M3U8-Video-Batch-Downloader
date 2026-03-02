@@ -44,6 +44,16 @@
             <label for="video-name">Video name</label>
             <input id="video-name" type="text" placeholder="my_video_name" />
           </div>
+          <div>
+            <label for="output-format">Output format</label>
+            <select id="output-format">
+              <option value="mp4">MP4</option>
+              <option value="mkv">MKV</option>
+              <option value="webm">WEBM</option>
+              <option value="mov">MOV</option>
+              <option value="original">Original (source)</option>
+            </select>
+          </div>
           <div class="actions-col">
             <button id="add-task-btn" class="primary">Add</button>
           </div>
@@ -76,9 +86,11 @@
           </div>
         </div>
         <div class="toolbar">
-          <div>
-            <label for="workers">Parallel downloads</label>
-            <input id="workers" type="number" min="1" max="16" value="4" />
+          <div class="toolbar-settings">
+            <div>
+              <label for="workers">Parallel downloads</label>
+              <input id="workers" type="number" min="1" max="16" value="4" />
+            </div>
           </div>
           <div class="toolbar-actions">
             <button id="remove-selected-btn">Remove selected</button>
