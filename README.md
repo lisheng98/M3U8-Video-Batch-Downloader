@@ -4,6 +4,10 @@ Batch download `.m3u8` links with `yt-dlp` using either:
 - a localhost web UI (`yt_dlp_web.py`)
 - a desktop Tkinter app (`yt_dlp_batch_gui.py`)
 
+## UI Preview
+
+![Privacy-safe real web UI screenshot](output/imagegen/readme-website-sample.png)
+
 ## Features
 
 - Queue multiple links with custom output names
