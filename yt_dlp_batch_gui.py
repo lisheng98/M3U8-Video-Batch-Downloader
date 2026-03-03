@@ -458,8 +458,16 @@ class YtDlpBatchApp:
                 proc.terminate()
 
             assert proc.stdout is not None
+            last_progress_line: str | None = None
             for line in proc.stdout:
-                self.events.put({"type": "log", "text": f"[{name}] {line}"})
+                clean = line.rstrip("\r\n")
+                if clean.startswith("[download]"):
+                    if clean == last_progress_line:
+                        continue
+                    last_progress_line = clean
+                else:
+                    last_progress_line = None
+                self.events.put({"type": "log", "text": f"[{name}] {clean}\n"})
             code = proc.wait()
             with self.process_lock:
                 was_cancelled = item in self.cancel_requested

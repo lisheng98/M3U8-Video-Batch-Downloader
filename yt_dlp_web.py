@@ -279,8 +279,16 @@ class DownloadManager:
                 proc.terminate()
 
             assert proc.stdout is not None
+            last_progress_line: str | None = None
             for line in proc.stdout:
-                self.log(f"[{name}] {line}")
+                clean = line.rstrip("\r\n")
+                if clean.startswith("[download]"):
+                    if clean == last_progress_line:
+                        continue
+                    last_progress_line = clean
+                else:
+                    last_progress_line = None
+                self.log(f"[{name}] {clean}\n")
 
             code = proc.wait()
             with self.lock:
