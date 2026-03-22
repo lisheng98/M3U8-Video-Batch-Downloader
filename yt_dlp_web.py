@@ -82,6 +82,10 @@ class DownloadManager:
         self.active_run: set[str] = set()
         self.cancel_requested: set[str] = set()
 
+    def _remove_task_from_queue_locked(self, task_id: str) -> None:
+        self.tasks.pop(task_id, None)
+        self.task_order = [queued_id for queued_id in self.task_order if queued_id != task_id]
+
     def _log_locked(self, text: str) -> None:
         self.log_seq += 1
         self.logs.append({"seq": self.log_seq, "text": text})
@@ -177,10 +181,7 @@ class DownloadManager:
         with self.lock:
             removable = [task_id for task_id in self.task_order if self.tasks.get(task_id) and self.tasks[task_id].status in done]
             for task_id in removable:
-                self.tasks.pop(task_id, None)
-            if removable:
-                remove_set = set(removable)
-                self.task_order = [task_id for task_id in self.task_order if task_id not in remove_set]
+                self._remove_task_from_queue_locked(task_id)
             return len(removable)
 
     def clear_logs(self) -> None:
@@ -307,6 +308,9 @@ class DownloadManager:
                 if task is not None:
                     task.status = final_status
                     task.updated_at = utc_now_iso()
+                    if final_status == "Completed":
+                        self._log_locked(f"[{task.name}] Removed from queue after success.\n")
+                        self._remove_task_from_queue_locked(task_id)
                 self.active_run.discard(task_id)
                 self._maybe_finish_run_locked()
 
