@@ -60,7 +60,6 @@ const els = {
   url: document.getElementById("video-url"),
   name: document.getElementById("video-name"),
   nameHistoryList: document.getElementById("video-name-history"),
-  workers: document.getElementById("workers"),
   outputFormat: document.getElementById("output-format"),
   addBtn: document.getElementById("add-task-btn"),
   removeSelectedBtn: document.getElementById("remove-selected-btn"),
@@ -171,8 +170,12 @@ function handleHistoryNavigation(event, inputEl, historyKey, indexKey, draftKey)
   return true;
 }
 
+function isStartableTask(task) {
+  return ["Queued", "Failed", "Cancelled"].includes(task.status);
+}
+
 function hasStartableTasks() {
-  return state.tasks.some((task) => task.status === "Queued" || task.status === "Failed");
+  return state.tasks.some((task) => isStartableTask(task));
 }
 
 function normalizeName(value) {
@@ -300,6 +303,17 @@ function endDragSelection() {
 function rowHtml(task) {
   const selectedClass = state.selected.has(task.id) ? "selected" : "";
   const statusClass = statusClassName(task.status);
+  const actionButtons = [];
+  if (task.status === "Running") {
+    actionButtons.push(`<button type="button" data-action="stop" data-id="${task.id}">Stop</button>`);
+  } else if (isStartableTask(task)) {
+    actionButtons.push(`<button type="button" data-action="start" data-id="${task.id}">Start</button>`);
+    actionButtons.push(`<button type="button" data-action="edit" data-id="${task.id}">Edit</button>`);
+    actionButtons.push(`<button type="button" data-action="remove" data-id="${task.id}">Remove</button>`);
+  } else {
+    actionButtons.push(`<button type="button" data-action="edit" data-id="${task.id}">Edit</button>`);
+    actionButtons.push(`<button type="button" data-action="remove" data-id="${task.id}">Remove</button>`);
+  }
   return `
     <tr data-id="${task.id}" class="${selectedClass}">
       <td>${escapeHtml(task.url)}</td>
@@ -307,8 +321,7 @@ function rowHtml(task) {
       <td><span class="status-tag ${statusClass}">${escapeHtml(task.status)}</span></td>
       <td>
         <div class="row-actions">
-          <button type="button" data-action="edit" data-id="${task.id}">Edit</button>
-          <button type="button" data-action="remove" data-id="${task.id}">Remove</button>
+          ${actionButtons.join("")}
         </div>
       </td>
     </tr>
@@ -357,7 +370,7 @@ async function refreshState() {
     state.tasks = data.tasks || [];
     keepSelectionValid();
     renderTable();
-    els.startBtn.disabled = !!data.running || !hasStartableTasks();
+    els.startBtn.disabled = !hasStartableTasks();
     if (!data.yt_dlp_found) {
       setStatus("yt-dlp is not found. Install it with: brew install yt-dlp", true);
     }
@@ -422,21 +435,39 @@ async function addTask() {
   }
 }
 
+function getDownloadSettings() {
+  return {
+    output_dir: els.outputDir.value.trim() || state.defaultOutputDir,
+    output_format: (els.outputFormat.value || state.defaultOutputFormat || "mp4").toLowerCase(),
+  };
+}
+
 async function startDownloads() {
-  const outputDir = els.outputDir.value.trim() || state.defaultOutputDir;
-  const workers = Number(els.workers.value || 4);
-  const outputFormat = (els.outputFormat.value || state.defaultOutputFormat || "mp4").toLowerCase();
   if (!hasStartableTasks()) {
     setStatus("No queued downloads found.");
     return;
   }
   try {
-    const data = await api("/api/start", "POST", { output_dir: outputDir, workers, output_format: outputFormat });
+    const data = await api("/api/start", "POST", getDownloadSettings());
     if ((data.started || 0) > 0) {
       setStatus(`Started ${data.started} download(s).`);
     } else {
       setStatus("No queued downloads found.");
     }
+    await refreshState();
+  } catch (err) {
+    setStatus(err.message, true);
+  }
+}
+
+async function startTask(taskId) {
+  const task = getTaskById(taskId);
+  if (!task || !isStartableTask(task)) {
+    return;
+  }
+  try {
+    await api(`/api/tasks/${taskId}/start`, "POST", getDownloadSettings());
+    setStatus(`Started ${task.name}.`);
     await refreshState();
   } catch (err) {
     setStatus(err.message, true);
@@ -470,6 +501,20 @@ async function removeOne(taskId) {
   }
 }
 
+async function stopTask(taskId) {
+  const task = getTaskById(taskId);
+  if (!task || task.status !== "Running") {
+    return;
+  }
+  try {
+    await api(`/api/tasks/${taskId}/stop`, "POST", {});
+    setStatus(`Stop requested for ${task.name}.`);
+    await refreshState();
+  } catch (err) {
+    setStatus(err.message, true);
+  }
+}
+
 async function clearFinished() {
   try {
     const data = await api("/api/clear-finished", "POST", {});
@@ -483,8 +528,7 @@ async function clearFinished() {
 async function stopAllRunning() {
   try {
     const data = await api("/api/stop-all", "POST", {});
-    state.selected = new Set();
-    setStatus(`Stopped ${data.stopped} running task(s).`);
+    setStatus(`Stop requested for ${data.stopped} running task(s).`);
     await refreshState();
   } catch (err) {
     setStatus(err.message, true);
@@ -617,7 +661,11 @@ function bindEvents() {
     }
     const taskId = actionBtn.dataset.id;
     const action = actionBtn.dataset.action;
-    if (action === "edit") {
+    if (action === "start") {
+      startTask(taskId);
+    } else if (action === "stop") {
+      stopTask(taskId);
+    } else if (action === "edit") {
       editTask(taskId);
     } else if (action === "remove") {
       removeOne(taskId);

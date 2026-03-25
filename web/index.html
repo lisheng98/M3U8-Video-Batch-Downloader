@@ -65,7 +65,7 @@
         <div class="panel-head split">
           <div>
             <h2>Queue Control</h2>
-            <p>Manage parallel workers and execute the queue.</p>
+            <p>Start, stop, and clear queue items as needed.</p>
           </div>
           <div class="stats" aria-label="Queue stats">
             <div class="stat">
@@ -87,17 +87,11 @@
           </div>
         </div>
         <div class="toolbar">
-          <div class="toolbar-settings">
-            <div>
-              <label for="workers">Parallel downloads</label>
-              <input id="workers" type="number" min="1" max="16" value="4" />
-            </div>
-          </div>
           <div class="toolbar-actions">
             <button id="remove-selected-btn">Remove selected</button>
             <button id="clear-finished-btn">Clear done/failed/cancelled</button>
             <button id="stop-all-btn">Stop all running</button>
-            <button id="start-btn" class="primary">Start downloads</button>
+            <button id="start-btn" class="primary">Start all downloads</button>
           </div>
         </div>
 

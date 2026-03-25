@@ -11,8 +11,9 @@ Batch download `.m3u8` links with `yt-dlp` using either:
 ## Features
 
 - Queue multiple links with custom output names
-- Run downloads in parallel (1 to 16 workers)
+- Run multiple downloads in parallel
 - Choose output format (`mp4`, `mkv`, `webm`, `mov`, or `original`)
+- Start/stop individual queue items from the web UI
 - Edit/remove queued items
 - Stop running tasks
 - Stream live logs
@@ -55,8 +56,9 @@ python3 yt_dlp_batch_gui.py
 
 1. Set output folder (default is `~/Downloads`).
 2. Add `Link (.m3u8)` and `Video name`.
-3. Choose `Parallel downloads` and `Output format`.
-4. Click `Start downloads`.
+3. Choose `Output format`.
+4. Use row actions to start, stop, edit, or remove individual tasks when needed.
+5. Click `Start all downloads` to run all queued downloads.
 
 Equivalent command per task:
 

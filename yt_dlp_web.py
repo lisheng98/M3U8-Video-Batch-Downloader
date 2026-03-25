@@ -4,15 +4,14 @@
 from __future__ import annotations
 
 import argparse
+import glob
 import json
-import os
 import shlex
 import shutil
 import subprocess
 import threading
 import uuid
 import webbrowser
-from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from http import HTTPStatus
@@ -76,15 +75,73 @@ class DownloadManager:
         self.log_seq = 0
         self.running = False
 
-        self.executor: ThreadPoolExecutor | None = None
-        self.futures: dict[str, Future] = {}
+        self.threads: dict[str, threading.Thread] = {}
         self.processes: dict[str, subprocess.Popen] = {}
         self.active_run: set[str] = set()
         self.cancel_requested: set[str] = set()
+        self.remove_after_finish: set[str] = set()
 
     def _remove_task_from_queue_locked(self, task_id: str) -> None:
         self.tasks.pop(task_id, None)
         self.task_order = [queued_id for queued_id in self.task_order if queued_id != task_id]
+
+    def _matching_output_files(self, output_dir: Path, name: str) -> set[Path]:
+        literal_name = glob.escape(name)
+        return {path for path in output_dir.glob(f"{literal_name}.*") if path.is_file()}
+
+    def _find_task_by_name_locked(self, name: str, *, ignore_task_id: str | None = None) -> Task | None:
+        wanted = name.casefold()
+        for existing_id in self.task_order:
+            if existing_id == ignore_task_id:
+                continue
+            task = self.tasks.get(existing_id)
+            if task is not None and task.name.casefold() == wanted:
+                return task
+        return None
+
+    def _cleanup_cancelled_outputs(self, output_dir: Path, name: str, existing_files: set[Path]) -> list[str]:
+        removed: list[str] = []
+        for path in sorted(self._matching_output_files(output_dir, name)):
+            if path in existing_files:
+                continue
+            try:
+                path.unlink()
+                removed.append(path.name)
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                self.log(f"[{name}] Failed to remove partial file {path.name}: {exc}\n")
+        return removed
+
+    def _queue_task_locked(self, task_id: str, output_dir: Path, output_format: str) -> bool:
+        task = self.tasks.get(task_id)
+        if task is None or task.status not in {"Queued", "Failed", "Cancelled"}:
+            return False
+        task.status = "Running"
+        task.updated_at = utc_now_iso()
+        self.cancel_requested.discard(task_id)
+        self.remove_after_finish.discard(task_id)
+        self.active_run.add(task_id)
+        self.running = True
+        thread = threading.Thread(target=self._run_one, args=(task_id, output_dir, output_format), daemon=True)
+        self.threads[task_id] = thread
+        thread.start()
+        return True
+
+    def _cancel_task_locked(self, task_id: str, *, remove_after_finish: bool = False) -> bool:
+        task = self.tasks.get(task_id)
+        if task is None or task.status != "Running":
+            return False
+
+        self.cancel_requested.add(task_id)
+        if remove_after_finish:
+            self.remove_after_finish.add(task_id)
+
+        proc = self.processes.get(task_id)
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
+        self._log_locked(f"[{task.name}] Stop requested.\n")
+        return True
 
     def _log_locked(self, text: str) -> None:
         self.log_seq += 1
@@ -126,6 +183,8 @@ class DownloadManager:
         task_id = uuid.uuid4().hex[:10]
         task = Task(id=task_id, url=url, name=name)
         with self.lock:
+            if self._find_task_by_name_locked(name) is not None:
+                raise ValueError("Output name already exists in the queue.")
             self.tasks[task_id] = task
             self.task_order.append(task_id)
         return task.to_json()
@@ -142,6 +201,8 @@ class DownloadManager:
                 raise KeyError("Task not found.")
             if task.status == "Running":
                 raise RuntimeError("Cannot edit a running task.")
+            if self._find_task_by_name_locked(name, ignore_task_id=task_id) is not None:
+                raise ValueError("Output name already exists in the queue.")
             task.url = url
             task.name = name
             task.status = "Queued"
@@ -157,21 +218,12 @@ class DownloadManager:
                     continue
 
                 removed_ids.add(task_id)
-                self.cancel_requested.add(task_id)
-                future = self.futures.get(task_id)
-                if future is not None and future.cancel():
-                    self.futures.pop(task_id, None)
-                    self.active_run.discard(task_id)
-
-                proc = self.processes.get(task_id)
-                if proc is not None and proc.poll() is None:
-                    proc.terminate()
-                    self._log_locked(f"[{task.name}] Stop requested.\n")
-
-                self.tasks.pop(task_id, None)
+                if task.status == "Running":
+                    self._cancel_task_locked(task_id, remove_after_finish=True)
+                    continue
+                self._remove_task_from_queue_locked(task_id)
 
             if removed_ids:
-                self.task_order = [task_id for task_id in self.task_order if task_id not in removed_ids]
                 self._maybe_finish_run_locked()
 
         return len(removed_ids)
@@ -189,46 +241,61 @@ class DownloadManager:
             self.logs = []
             self.log_seq = 0
 
-    def start_downloads(self, output_dir: str, workers: int, output_format: str) -> int:
+    def start_downloads(self, output_dir: str, output_format: str) -> int:
         if shutil.which("yt-dlp") is None:
             raise RuntimeError("yt-dlp not found. Install it first (example: brew install yt-dlp).")
 
-        workers = max(1, min(16, int(workers)))
         out_dir = Path(output_dir).expanduser().resolve()
         out_dir.mkdir(parents=True, exist_ok=True)
         chosen_format = normalize_output_format(output_format)
 
         with self.lock:
-            if self.running:
-                raise RuntimeError("Downloads are already running.")
-
             pending = [
                 task_id
                 for task_id in self.task_order
-                if task_id in self.tasks and self.tasks[task_id].status in {"Queued", "Failed"}
+                if task_id in self.tasks and self.tasks[task_id].status in {"Queued", "Failed", "Cancelled"}
             ]
             if not pending:
                 self._log_locked("No queued downloads found.\n")
                 return 0
 
-            self.running = True
-            self.active_run = set(pending)
-            self.executor = ThreadPoolExecutor(max_workers=workers)
-            self._log_locked(
-                f"Starting {len(pending)} download(s) with {workers} parallel worker(s), output format: {chosen_format}.\n"
-            )
+            self._log_locked(f"Starting {len(pending)} download(s), output format: {chosen_format}.\n")
 
+            started = 0
             for task_id in pending:
-                task = self.tasks.get(task_id)
-                if task is None:
-                    continue
-                task.status = "Running"
-                task.updated_at = utc_now_iso()
-                self.cancel_requested.discard(task_id)
-                future = self.executor.submit(self._run_one, task_id, out_dir, chosen_format)
-                self.futures[task_id] = future
+                if self._queue_task_locked(task_id, out_dir, chosen_format):
+                    started += 1
 
-            return len(pending)
+            return started
+
+    def start_task(self, task_id: str, output_dir: str, output_format: str) -> dict:
+        if shutil.which("yt-dlp") is None:
+            raise RuntimeError("yt-dlp not found. Install it first (example: brew install yt-dlp).")
+
+        out_dir = Path(output_dir).expanduser().resolve()
+        out_dir.mkdir(parents=True, exist_ok=True)
+        chosen_format = normalize_output_format(output_format)
+
+        with self.lock:
+            task = self.tasks.get(task_id)
+            if task is None:
+                raise KeyError("Task not found.")
+            if task.status not in {"Queued", "Failed", "Cancelled"}:
+                raise RuntimeError("Task is already running.")
+
+            if not self._queue_task_locked(task_id, out_dir, chosen_format):
+                raise RuntimeError("Task could not be started.")
+            self._log_locked(f"[{task.name}] Queued to start, output format: {chosen_format}.\n")
+            return task.to_json()
+
+    def stop_task(self, task_id: str) -> dict:
+        with self.lock:
+            task = self.tasks.get(task_id)
+            if task is None:
+                raise KeyError("Task not found.")
+            if not self._cancel_task_locked(task_id):
+                raise RuntimeError("Task is not running.")
+            return task.to_json()
 
     def _run_one(self, task_id: str, output_dir: Path, output_format: str) -> None:
         final_status = "Failed"
@@ -237,21 +304,29 @@ class DownloadManager:
         with self.lock:
             task = self.tasks.get(task_id)
             if task is None:
+                self.cancel_requested.discard(task_id)
+                self.remove_after_finish.discard(task_id)
+                self.threads.pop(task_id, None)
                 self.active_run.discard(task_id)
-                self.futures.pop(task_id, None)
                 self._maybe_finish_run_locked()
                 return
             if task_id in self.cancel_requested:
                 final_status = "Cancelled"
                 task.status = final_status
                 task.updated_at = utc_now_iso()
+                should_remove_after_finish = task_id in self.remove_after_finish
+                self.cancel_requested.discard(task_id)
+                self.remove_after_finish.discard(task_id)
+                if should_remove_after_finish:
+                    self._remove_task_from_queue_locked(task_id)
+                self.threads.pop(task_id, None)
                 self.active_run.discard(task_id)
-                self.futures.pop(task_id, None)
                 self._maybe_finish_run_locked()
                 return
             url = task.url
             name = task.name
 
+        existing_output_files = self._matching_output_files(output_dir, name)
         output_template = str(output_dir / f"{name}.%(ext)s")
         cmd = [
             "yt-dlp",
@@ -301,32 +376,48 @@ class DownloadManager:
                 was_cancelled = task_id in self.cancel_requested
             final_status = "Cancelled" if was_cancelled else "Failed"
         finally:
+            removed_files: list[str] = []
+            should_remove_after_finish = False
             with self.lock:
                 self.processes.pop(task_id, None)
-                self.futures.pop(task_id, None)
+                self.threads.pop(task_id, None)
+                self.cancel_requested.discard(task_id)
+                should_remove_after_finish = task_id in self.remove_after_finish
+                self.remove_after_finish.discard(task_id)
                 task = self.tasks.get(task_id)
                 if task is not None:
                     task.status = final_status
                     task.updated_at = utc_now_iso()
+                self.active_run.discard(task_id)
+
+            if final_status == "Cancelled":
+                removed_files = self._cleanup_cancelled_outputs(output_dir, name, existing_output_files)
+
+            with self.lock:
+                task = self.tasks.get(task_id)
+                if removed_files:
+                    self._log_locked(f"[{name}] Removed partial files after interruption: {', '.join(removed_files)}\n")
+                if task is not None:
                     if final_status == "Completed":
                         self._log_locked(f"[{task.name}] Removed from queue after success.\n")
                         self._remove_task_from_queue_locked(task_id)
-                self.active_run.discard(task_id)
+                    elif final_status == "Cancelled" and should_remove_after_finish:
+                        self._remove_task_from_queue_locked(task_id)
                 self._maybe_finish_run_locked()
 
     def _maybe_finish_run_locked(self) -> None:
         if self.running and not self.active_run:
             self.running = False
             self._log_locked("\nAll downloads finished.\n")
-            executor = self.executor
-            self.executor = None
-            if executor is not None:
-                threading.Thread(target=executor.shutdown, kwargs={"wait": False}, daemon=True).start()
 
     def stop_all(self) -> int:
         with self.lock:
             target_ids = list(self.active_run)
-        return self.remove_tasks(target_ids)
+            stopped = 0
+            for task_id in target_ids:
+                if self._cancel_task_locked(task_id):
+                    stopped += 1
+            return stopped
 
 
 MANAGER = DownloadManager()
@@ -417,6 +508,22 @@ class AppHandler(BaseHTTPRequestHandler):
                 task = MANAGER.add_task(payload.get("url", ""), payload.get("name", ""))
                 self._send_json({"task": task}, HTTPStatus.CREATED)
                 return
+            if path.startswith("/api/tasks/") and path.endswith("/start"):
+                task_id = path.removeprefix("/api/tasks/").removesuffix("/start").strip("/")
+                output_dir = str(payload.get("output_dir", "")).strip() or DEFAULT_OUTPUT_DIR
+                output_format = normalize_output_format(payload.get("output_format"))
+                task = MANAGER.start_task(
+                    task_id,
+                    output_dir=output_dir,
+                    output_format=output_format,
+                )
+                self._send_json({"task": task})
+                return
+            if path.startswith("/api/tasks/") and path.endswith("/stop"):
+                task_id = path.removeprefix("/api/tasks/").removesuffix("/stop").strip("/")
+                task = MANAGER.stop_task(task_id)
+                self._send_json({"task": task})
+                return
             if path == "/api/remove":
                 ids = payload.get("ids", [])
                 if not isinstance(ids, list):
@@ -434,9 +541,8 @@ class AppHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/start":
                 output_dir = str(payload.get("output_dir", "")).strip() or DEFAULT_OUTPUT_DIR
-                workers = int(payload.get("workers", min(4, os.cpu_count() or 4)))
                 output_format = normalize_output_format(payload.get("output_format"))
-                count = MANAGER.start_downloads(output_dir=output_dir, workers=workers, output_format=output_format)
+                count = MANAGER.start_downloads(output_dir=output_dir, output_format=output_format)
                 self._send_json({"started": count})
                 return
             if path == "/api/stop-all":
