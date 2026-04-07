@@ -223,6 +223,35 @@ function statusClassName(status) {
     .replace(/[^a-z0-9_-]/g, "-");
 }
 
+function clampProgress(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return 0;
+  }
+  return Math.max(0, Math.min(100, numeric));
+}
+
+function statusCellHtml(task) {
+  const statusClass = statusClassName(task.status);
+  const badge = `<span class="status-tag ${statusClass}">${escapeHtml(task.status)}</span>`;
+  if (task.status !== "Running") {
+    return badge;
+  }
+  const progress = clampProgress(task.progress);
+  const progressText = escapeHtml(task.progress_text || `${progress}%`);
+  return `
+    <div class="status-cell">
+      ${badge}
+      <div class="status-progress">
+        <div class="status-progress-bar" aria-hidden="true">
+          <div class="status-progress-fill" style="width: ${progress}%"></div>
+        </div>
+        <span class="status-progress-text">${progressText}</span>
+      </div>
+    </div>
+  `;
+}
+
 function updateActionStates() {
   const hasSelection = state.selected.size > 0;
   const hasRunning = state.tasks.some((task) => task.status === "Running");
@@ -302,7 +331,6 @@ function endDragSelection() {
 
 function rowHtml(task) {
   const selectedClass = state.selected.has(task.id) ? "selected" : "";
-  const statusClass = statusClassName(task.status);
   const actionButtons = [];
   if (task.status === "Running") {
     actionButtons.push(`<button type="button" data-action="stop" data-id="${task.id}">Stop</button>`);
@@ -318,7 +346,7 @@ function rowHtml(task) {
     <tr data-id="${task.id}" class="${selectedClass}">
       <td>${escapeHtml(task.url)}</td>
       <td>${escapeHtml(task.name)}</td>
-      <td><span class="status-tag ${statusClass}">${escapeHtml(task.status)}</span></td>
+      <td>${statusCellHtml(task)}</td>
       <td>
         <div class="row-actions">
           ${actionButtons.join("")}

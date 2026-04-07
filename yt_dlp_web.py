@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import glob
 import json
+import re
 import shlex
 import shutil
 import subprocess
@@ -22,6 +23,7 @@ from urllib.parse import parse_qs, urlparse
 SUPPORTED_OUTPUT_FORMATS = ("mp4", "mkv", "webm", "mov", "original")
 DEFAULT_OUTPUT_FORMAT = "mp4"
 NORMALIZED_EXTENSIONS = {"mp4", "mkv", "webm", "mov", "avi", "flv", "m4v"}
+DOWNLOAD_PROGRESS_RE = re.compile(r"^\[download\]\s+(\d+(?:\.\d+)?)%")
 
 
 def utc_now_iso() -> str:
@@ -46,12 +48,23 @@ def normalize_output_format(raw_format: str | None) -> str:
     return value
 
 
+def parse_download_progress(line: str) -> tuple[float, str] | None:
+    match = DOWNLOAD_PROGRESS_RE.search(line.strip())
+    if match is None:
+        return None
+    value = max(0.0, min(100.0, float(match.group(1))))
+    label = f"{value:.1f}".rstrip("0").rstrip(".") + "%"
+    return value, label
+
+
 @dataclass
 class Task:
     id: str
     url: str
     name: str
     status: str = "Queued"
+    progress: float = 0.0
+    progress_text: str = ""
     created_at: str = field(default_factory=utc_now_iso)
     updated_at: str = field(default_factory=utc_now_iso)
 
@@ -61,6 +74,8 @@ class Task:
             "url": self.url,
             "name": self.name,
             "status": self.status,
+            "progress": self.progress,
+            "progress_text": self.progress_text,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
@@ -118,6 +133,8 @@ class DownloadManager:
         if task is None or task.status not in {"Queued", "Failed", "Cancelled"}:
             return False
         task.status = "Running"
+        task.progress = 0.0
+        task.progress_text = "0%"
         task.updated_at = utc_now_iso()
         self.cancel_requested.discard(task_id)
         self.remove_after_finish.discard(task_id)
@@ -206,6 +223,8 @@ class DownloadManager:
             task.url = url
             task.name = name
             task.status = "Queued"
+            task.progress = 0.0
+            task.progress_text = ""
             task.updated_at = utc_now_iso()
             return task.to_json()
 
@@ -313,6 +332,7 @@ class DownloadManager:
             if task_id in self.cancel_requested:
                 final_status = "Cancelled"
                 task.status = final_status
+                task.progress_text = ""
                 task.updated_at = utc_now_iso()
                 should_remove_after_finish = task_id in self.remove_after_finish
                 self.cancel_requested.discard(task_id)
@@ -362,6 +382,14 @@ class DownloadManager:
                     if clean == last_progress_line:
                         continue
                     last_progress_line = clean
+                    progress = parse_download_progress(clean)
+                    if progress is not None:
+                        progress_value, progress_text = progress
+                        with self.lock:
+                            progress_task = self.tasks.get(task_id)
+                            if progress_task is not None:
+                                progress_task.progress = progress_value
+                                progress_task.progress_text = progress_text
                 else:
                     last_progress_line = None
                 self.log(f"[{name}] {clean}\n")
@@ -387,6 +415,11 @@ class DownloadManager:
                 task = self.tasks.get(task_id)
                 if task is not None:
                     task.status = final_status
+                    if final_status == "Completed":
+                        task.progress = 100.0
+                        task.progress_text = "100%"
+                    elif final_status != "Running":
+                        task.progress_text = ""
                     task.updated_at = utc_now_iso()
                 self.active_run.discard(task_id)
 

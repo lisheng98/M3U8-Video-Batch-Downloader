@@ -14,6 +14,7 @@ Batch download `.m3u8` links with `yt-dlp` using either:
 - Run multiple downloads in parallel
 - Choose output format (`mp4`, `mkv`, `webm`, `mov`, or `original`)
 - Start/stop individual queue items from the web UI
+- View live per-task download progress in the queue
 - Edit/remove queued items
 - Stop running tasks
 - Stream live logs
