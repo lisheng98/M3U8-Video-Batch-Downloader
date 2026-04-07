@@ -125,6 +125,33 @@
       <div id="status" class="status"></div>
     </main>
 
+    <div id="edit-modal" class="modal" hidden>
+      <div class="modal-backdrop" data-action="close-edit-modal"></div>
+      <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="edit-modal-title">
+        <div class="modal-head">
+          <div>
+            <h2 id="edit-modal-title">Edit Queue Item</h2>
+            <p>Update link and output name together.</p>
+          </div>
+          <button id="edit-modal-close-btn" type="button">Close</button>
+        </div>
+        <form id="edit-task-form" class="modal-form">
+          <div class="row stack">
+            <label for="edit-video-url">Link (.m3u8)</label>
+            <input id="edit-video-url" type="text" placeholder="https://example.com/video.m3u8" />
+          </div>
+          <div class="row stack">
+            <label for="edit-video-name">Video name</label>
+            <input id="edit-video-name" type="text" placeholder="my_video_name" />
+          </div>
+          <div class="modal-actions">
+            <button id="edit-modal-cancel-btn" type="button">Cancel</button>
+            <button id="edit-modal-save-btn" type="submit" class="primary">Save changes</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
     <script src="/app.js"></script>
   </body>
 </html>

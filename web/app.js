@@ -47,6 +47,7 @@ const state = {
   nameHistory: loadHistory(HISTORY_KEYS.name),
   nameHistoryIndex: null,
   nameHistoryDraft: "",
+  editingTaskId: null,
   drag: {
     active: false,
     startId: null,
@@ -67,6 +68,12 @@ const els = {
   stopAllBtn: document.getElementById("stop-all-btn"),
   startBtn: document.getElementById("start-btn"),
   clearLogsBtn: document.getElementById("clear-logs-btn"),
+  editModal: document.getElementById("edit-modal"),
+  editTaskForm: document.getElementById("edit-task-form"),
+  editUrl: document.getElementById("edit-video-url"),
+  editName: document.getElementById("edit-video-name"),
+  editModalCloseBtn: document.getElementById("edit-modal-close-btn"),
+  editModalCancelBtn: document.getElementById("edit-modal-cancel-btn"),
   tableBody: document.getElementById("tasks-body"),
   logs: document.getElementById("logs"),
   status: document.getElementById("status"),
@@ -581,26 +588,43 @@ async function clearLogs() {
   }
 }
 
-async function editTask(taskId) {
+function closeEditModal() {
+  if (!els.editModal) {
+    return;
+  }
+  els.editModal.hidden = true;
+  state.editingTaskId = null;
+  els.editUrl.value = "";
+  els.editName.value = "";
+}
+
+function openEditModal(taskId) {
   const task = getTaskById(taskId);
-  if (!task) {
+  if (!task || !els.editModal) {
     return;
   }
-  const nextUrl = window.prompt("Edit link (.m3u8):", task.url);
-  if (nextUrl === null) {
+  state.editingTaskId = taskId;
+  els.editUrl.value = task.url;
+  els.editName.value = task.name;
+  els.editModal.hidden = false;
+  els.editUrl.focus();
+  els.editUrl.setSelectionRange(els.editUrl.value.length, els.editUrl.value.length);
+}
+
+async function submitEditTask(event) {
+  event.preventDefault();
+  if (!state.editingTaskId) {
     return;
   }
-  const nextNameRaw = window.prompt("Edit output name:", task.name);
-  if (nextNameRaw === null) {
-    return;
-  }
-  const nextName = normalizeName(nextNameRaw);
-  if (!nextUrl.trim() || !nextName) {
+  const nextUrl = els.editUrl.value.trim();
+  const nextName = normalizeName(els.editName.value);
+  if (!nextUrl || !nextName) {
     setStatus("Link and video name are required.", true);
     return;
   }
   try {
-    await api(`/api/tasks/${taskId}`, "PATCH", { url: nextUrl.trim(), name: nextName });
+    await api(`/api/tasks/${state.editingTaskId}`, "PATCH", { url: nextUrl, name: nextName });
+    closeEditModal();
     setStatus("Task updated.");
     await refreshState();
   } catch (err) {
@@ -617,6 +641,14 @@ function bindEvents() {
   els.clearFinishedBtn.addEventListener("click", clearFinished);
   els.stopAllBtn.addEventListener("click", stopAllRunning);
   els.clearLogsBtn.addEventListener("click", clearLogs);
+  els.editTaskForm.addEventListener("submit", submitEditTask);
+  els.editModalCloseBtn.addEventListener("click", closeEditModal);
+  els.editModalCancelBtn.addEventListener("click", closeEditModal);
+  els.editModal.addEventListener("click", (event) => {
+    if (event.target.dataset.action === "close-edit-modal") {
+      closeEditModal();
+    }
+  });
 
   els.url.addEventListener("keydown", (event) => {
     if (event.key === "Enter") {
@@ -682,6 +714,12 @@ function bindEvents() {
     endDragSelection();
   });
 
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && els.editModal && !els.editModal.hidden) {
+      closeEditModal();
+    }
+  });
+
   els.tableBody.addEventListener("click", (event) => {
     const actionBtn = event.target.closest("button[data-action]");
     if (!actionBtn) {
@@ -694,7 +732,7 @@ function bindEvents() {
     } else if (action === "stop") {
       stopTask(taskId);
     } else if (action === "edit") {
-      editTask(taskId);
+      openEditModal(taskId);
     } else if (action === "remove") {
       removeOne(taskId);
     }

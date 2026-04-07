@@ -505,6 +505,71 @@ pre#logs {
   color: var(--warn);
 }
 
+.modal[hidden] {
+  display: none;
+}
+
+.modal {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  display: grid;
+  place-items: center;
+  padding: 22px;
+}
+
+.modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(28, 20, 14, 0.48);
+  backdrop-filter: blur(4px);
+}
+
+.modal-card {
+  position: relative;
+  width: min(100%, 560px);
+  border-radius: 18px;
+  border: 1px solid rgba(253, 250, 244, 0.84);
+  background: linear-gradient(180deg, rgba(255, 251, 244, 0.98) 0%, rgba(248, 241, 231, 0.98) 100%);
+  box-shadow: 0 28px 55px -32px rgba(30, 20, 12, 0.78);
+  padding: 18px;
+  animation: fade-in-up 0.18s ease-out both;
+}
+
+.modal-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: start;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.modal-head h2 {
+  margin: 0;
+  font-size: 24px;
+  line-height: 1.1;
+  font-family: var(--font-display);
+  color: #2f241c;
+}
+
+.modal-head p {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.modal-form {
+  display: grid;
+  gap: 12px;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: end;
+  gap: 8px;
+  margin-top: 4px;
+}
+
 @keyframes fade-in-up {
   from {
     opacity: 0;
@@ -547,6 +612,10 @@ pre#logs {
 
   .toolbar-actions {
     justify-content: start;
+  }
+
+  .modal {
+    padding: 14px;
   }
 }
 
