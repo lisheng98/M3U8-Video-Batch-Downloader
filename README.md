@@ -6,7 +6,7 @@ Batch download `.m3u8` links with `yt-dlp` using either:
 
 ## UI Preview
 
-![Sanitized web UI preview with generic demo data](output/imagegen/readme-website-sample.png)
+![Sanitized web UI preview with generic demo data](output/imagegen/readme-website-preview-sanitized.png)
 
 ## Features
 
