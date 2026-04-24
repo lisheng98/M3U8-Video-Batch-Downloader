@@ -6,7 +6,7 @@ Batch download `.m3u8` links with `yt-dlp` using either:
 
 ## UI Preview
 
-![Privacy-safe real web UI screenshot](output/imagegen/readme-website-sample.png)
+![Sanitized web UI preview with generic demo data](output/imagegen/readme-website-sample.png)
 
 ## Features
 
@@ -71,4 +71,5 @@ yt-dlp "LINK" -o "VIDEO_NAME.%(ext)s" --merge-output-format FORMAT --remux-video
 
 - The web server binds to `127.0.0.1` by default (local machine only).
 - Do not use `--host 0.0.0.0` unless you intentionally want network access.
+- The README preview image uses generic demo links and a sanitized output-folder field.
 - Before publishing, keep local artifacts out of git (`.playwright-cli/`, `__pycache__/`, `*.pyc`).
