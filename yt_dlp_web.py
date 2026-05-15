@@ -23,7 +23,9 @@ from urllib.parse import parse_qs, urlparse
 SUPPORTED_OUTPUT_FORMATS = ("mp4", "mkv", "webm", "mov", "original")
 DEFAULT_OUTPUT_FORMAT = "mp4"
 NORMALIZED_EXTENSIONS = {"mp4", "mkv", "webm", "mov", "avi", "flv", "m4v"}
-DOWNLOAD_PROGRESS_RE = re.compile(r"^\[download\]\s+(\d+(?:\.\d+)?)%")
+DOWNLOAD_PROGRESS_RE = re.compile(
+    r"^\[download\]\s+(\d+(?:\.\d+)?)%(?:\s+of\s+(~)?\s*([0-9.]+)\s*([A-Za-z]+))?"
+)
 
 
 def utc_now_iso() -> str:
@@ -54,6 +56,11 @@ def parse_download_progress(line: str) -> tuple[float, str] | None:
         return None
     value = max(0.0, min(100.0, float(match.group(1))))
     label = f"{value:.1f}".rstrip("0").rstrip(".") + "%"
+    size_prefix = match.group(2) or ""
+    size_value = match.group(3)
+    size_unit = match.group(4)
+    if size_value and size_unit:
+        label = f"{label} · {size_prefix}{size_value} {size_unit}"
     return value, label
 
 
