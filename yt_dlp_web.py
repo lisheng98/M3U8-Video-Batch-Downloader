@@ -6,10 +6,12 @@ from __future__ import annotations
 import argparse
 import glob
 import json
+import os
 import re
 import shlex
 import shutil
 import subprocess
+import sys
 import threading
 import uuid
 import webbrowser
@@ -25,6 +27,19 @@ DEFAULT_OUTPUT_FORMAT = "mp4"
 NORMALIZED_EXTENSIONS = {"mp4", "mkv", "webm", "mov", "avi", "flv", "m4v"}
 DOWNLOAD_PROGRESS_RE = re.compile(
     r"^\[download\]\s+(\d+(?:\.\d+)?)%(?:\s+of\s+(~)?\s*([0-9.]+)\s*([A-Za-z]+))?"
+)
+COOKIES_BROWSER_CANDIDATES = ("chrome", "brave", "edge", "firefox", "safari")
+COOKIES_RETRY_RE = re.compile(
+    r"sign in to confirm"
+    r"|sign in if you've been granted"
+    r"|use --cookies"
+    r"|--cookies-from-browser"
+    r"|login required"
+    r"|members-only content"
+    r"|account cookies are no longer valid"
+    r"|could not (?:find|copy|read).{0,40}cookie"
+    r"|failed to decrypt",
+    re.IGNORECASE,
 )
 
 
@@ -62,6 +77,47 @@ def parse_download_progress(line: str) -> tuple[float, str] | None:
     if size_value and size_unit:
         label = f"{label} · {size_prefix}{size_value} {size_unit}"
     return value, label
+
+
+def _cookie_browser_profile_paths() -> dict[str, list[Path]]:
+    home = Path.home()
+    if sys.platform == "darwin":
+        app_support = home / "Library" / "Application Support"
+        return {
+            "chrome": [app_support / "Google" / "Chrome"],
+            "brave": [app_support / "BraveSoftware" / "Brave-Browser"],
+            "edge": [app_support / "Microsoft Edge"],
+            "firefox": [app_support / "Firefox" / "Profiles"],
+            "safari": [
+                home / "Library" / "Cookies" / "Cookies.binarycookies",
+                home / "Library" / "Containers" / "com.apple.Safari" / "Data" / "Library" / "Cookies" / "Cookies.binarycookies",
+            ],
+        }
+    if sys.platform.startswith("win"):
+        local_app_data = Path(os.environ.get("LOCALAPPDATA", str(home / "AppData" / "Local")))
+        roaming_app_data = Path(os.environ.get("APPDATA", str(home / "AppData" / "Roaming")))
+        return {
+            "chrome": [local_app_data / "Google" / "Chrome" / "User Data"],
+            "brave": [local_app_data / "BraveSoftware" / "Brave-Browser" / "User Data"],
+            "edge": [local_app_data / "Microsoft" / "Edge" / "User Data"],
+            "firefox": [roaming_app_data / "Mozilla" / "Firefox" / "Profiles"],
+        }
+    config_home = Path(os.environ.get("XDG_CONFIG_HOME", str(home / ".config")))
+    return {
+        "chrome": [config_home / "google-chrome"],
+        "brave": [config_home / "BraveSoftware" / "Brave-Browser"],
+        "edge": [config_home / "microsoft-edge"],
+        "firefox": [home / ".mozilla" / "firefox"],
+    }
+
+
+def detect_cookie_browsers() -> list[str]:
+    profile_paths = _cookie_browser_profile_paths()
+    return [
+        browser
+        for browser in COOKIES_BROWSER_CANDIDATES
+        if any(path.exists() for path in profile_paths.get(browser, []))
+    ]
 
 
 @dataclass
@@ -323,9 +379,51 @@ class DownloadManager:
                 raise RuntimeError("Task is not running.")
             return task.to_json()
 
+    def _run_attempt(self, task_id: str, name: str, cmd: list[str]) -> tuple[int, bool]:
+        cmd_text = " ".join(shlex.quote(part) for part in cmd)
+        self.log(f"\n[{name}] {cmd_text}\n")
+
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        with self.lock:
+            self.processes[task_id] = proc
+            should_cancel = task_id in self.cancel_requested
+
+        if should_cancel and proc.poll() is None:
+            proc.terminate()
+
+        needs_cookies = False
+        assert proc.stdout is not None
+        last_progress_line: str | None = None
+        for line in proc.stdout:
+            clean = line.rstrip("\r\n")
+            if COOKIES_RETRY_RE.search(clean):
+                needs_cookies = True
+            if clean.startswith("[download]"):
+                if clean == last_progress_line:
+                    continue
+                last_progress_line = clean
+                progress = parse_download_progress(clean)
+                if progress is not None:
+                    progress_value, progress_text = progress
+                    with self.lock:
+                        progress_task = self.tasks.get(task_id)
+                        if progress_task is not None:
+                            progress_task.progress = progress_value
+                            progress_task.progress_text = progress_text
+            else:
+                last_progress_line = None
+            self.log(f"[{name}] {clean}\n")
+
+        return proc.wait(), needs_cookies
+
     def _run_one(self, task_id: str, output_dir: Path, output_format: str) -> None:
         final_status = "Failed"
-        proc: subprocess.Popen | None = None
 
         with self.lock:
             task = self.tasks.get(task_id)
@@ -363,45 +461,48 @@ class DownloadManager:
         ]
         if output_format != "original":
             cmd.extend(["--merge-output-format", output_format, "--remux-video", output_format])
-        cmd_text = " ".join(shlex.quote(part) for part in cmd)
-        self.log(f"\n[{name}] {cmd_text}\n")
 
         try:
-            proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-            )
-            with self.lock:
-                self.processes[task_id] = proc
-                should_cancel = task_id in self.cancel_requested
+            code, needs_cookies = self._run_attempt(task_id, name, cmd)
 
-            if should_cancel and proc.poll() is None:
-                proc.terminate()
+            if code != 0 and needs_cookies:
+                browsers = detect_cookie_browsers()
+                if not browsers:
+                    self.log(
+                        f"[{name}] This link requires sign-in cookies, but no supported browser profile was found "
+                        "(Chrome, Brave, Edge, Firefox, Safari). Sign in to the site in one of those browsers, then retry.\n"
+                    )
+                attempted: list[str] = []
+                for browser in browsers:
+                    with self.lock:
+                        if task_id in self.cancel_requested or task_id not in self.tasks:
+                            break
+                        retry_task = self.tasks[task_id]
+                        retry_task.progress = 0.0
+                        retry_task.progress_text = f"Retrying with {browser.capitalize()} cookies"
+                        retry_task.updated_at = utc_now_iso()
+                    keychain_hint = (
+                        " (macOS may ask for keychain access - click Allow)"
+                        if sys.platform == "darwin" and browser in {"chrome", "brave", "edge"}
+                        else ""
+                    )
+                    self.log(
+                        f"[{name}] The site asks for sign-in cookies. "
+                        f"Retrying with cookies from {browser.capitalize()}{keychain_hint}.\n"
+                    )
+                    attempted.append(browser)
+                    code, needs_cookies = self._run_attempt(
+                        task_id, name, cmd + ["--cookies-from-browser", browser]
+                    )
+                    if code == 0 or not needs_cookies:
+                        break
+                if code != 0 and needs_cookies and attempted:
+                    self.log(
+                        f"[{name}] Still blocked after trying cookies from: "
+                        f"{', '.join(browser.capitalize() for browser in attempted)}. "
+                        "Make sure you are signed in to the site in one of those browsers.\n"
+                    )
 
-            assert proc.stdout is not None
-            last_progress_line: str | None = None
-            for line in proc.stdout:
-                clean = line.rstrip("\r\n")
-                if clean.startswith("[download]"):
-                    if clean == last_progress_line:
-                        continue
-                    last_progress_line = clean
-                    progress = parse_download_progress(clean)
-                    if progress is not None:
-                        progress_value, progress_text = progress
-                        with self.lock:
-                            progress_task = self.tasks.get(task_id)
-                            if progress_task is not None:
-                                progress_task.progress = progress_value
-                                progress_task.progress_text = progress_text
-                else:
-                    last_progress_line = None
-                self.log(f"[{name}] {clean}\n")
-
-            code = proc.wait()
             with self.lock:
                 was_cancelled = task_id in self.cancel_requested
             final_status = "Cancelled" if was_cancelled else ("Completed" if code == 0 else "Failed")
