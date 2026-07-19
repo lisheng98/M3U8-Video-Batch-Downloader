@@ -458,6 +458,8 @@ class DownloadManager:
             url,
             "-o",
             output_template,
+            "--extractor-args",
+            "generic:impersonate=chrome",
         ]
         if output_format != "original":
             cmd.extend(["--merge-output-format", output_format, "--remux-video", output_format])
