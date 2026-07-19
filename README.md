@@ -19,6 +19,7 @@ Batch download `.m3u8` links with `yt-dlp` using either:
 - Stop running tasks
 - Stream live logs
 - Optional container remux to selected format when supported
+- Auto-retry with browser cookies when YouTube asks to sign in (bot check, age gate, private/members-only videos)
 
 ## Requirements
 
@@ -66,6 +67,14 @@ Equivalent command per task:
 ```bash
 yt-dlp "LINK" -o "VIDEO_NAME.%(ext)s" --merge-output-format FORMAT --remux-video FORMAT
 ```
+
+## YouTube sign-in / cookies
+
+Some YouTube links fail with `Sign in to confirm you're not a bot` (or are age-gated / members-only). When the web UI detects this, it automatically retries the download with `--cookies-from-browser`, walking through installed browsers in order: Chrome, Brave, Edge, Firefox, Safari.
+
+- Be signed in to YouTube in one of those browsers for the retry to work.
+- On macOS, reading Chrome/Brave/Edge cookies can trigger a one-time keychain prompt — click "Allow".
+- Reading Safari cookies may require granting your terminal Full Disk Access.
 
 ## Privacy and safety notes
 
