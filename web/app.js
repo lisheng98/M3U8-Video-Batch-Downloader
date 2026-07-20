@@ -1,8 +1,15 @@
-const HISTORY_LIMIT = 10;
 const HISTORY_KEYS = {
   url: "yt_dlp_url_history",
   name: "yt_dlp_name_history",
 };
+const HISTORY_LIMITS = {
+  [HISTORY_KEYS.url]: 10,
+  [HISTORY_KEYS.name]: 100,
+};
+
+function historyLimit(storageKey) {
+  return HISTORY_LIMITS[storageKey] || 10;
+}
 
 function loadHistory(storageKey) {
   try {
@@ -18,7 +25,7 @@ function loadHistory(storageKey) {
       .filter((value) => typeof value === "string")
       .map((value) => value.trim())
       .filter(Boolean)
-      .slice(-HISTORY_LIMIT);
+      .slice(-historyLimit(storageKey));
   } catch (_err) {
     return [];
   }
@@ -26,7 +33,7 @@ function loadHistory(storageKey) {
 
 function saveHistory(storageKey, values) {
   try {
-    localStorage.setItem(storageKey, JSON.stringify(values.slice(-HISTORY_LIMIT)));
+    localStorage.setItem(storageKey, JSON.stringify(values.slice(-historyLimit(storageKey))));
   } catch (_err) {
     // Ignore storage write failures (private mode, quota, etc.).
   }
@@ -120,18 +127,21 @@ function pushHistory(kind, value) {
   }
   if (kind === "url") {
     state.urlHistory.push(nextValue);
-    if (state.urlHistory.length > HISTORY_LIMIT) {
-      state.urlHistory = state.urlHistory.slice(-HISTORY_LIMIT);
+    const urlLimit = historyLimit(HISTORY_KEYS.url);
+    if (state.urlHistory.length > urlLimit) {
+      state.urlHistory = state.urlHistory.slice(-urlLimit);
     }
     saveHistory(HISTORY_KEYS.url, state.urlHistory);
     return;
   }
-  if (state.nameHistory.includes(nextValue)) {
-    return;
+  const existingIndex = state.nameHistory.indexOf(nextValue);
+  if (existingIndex !== -1) {
+    state.nameHistory.splice(existingIndex, 1);
   }
   state.nameHistory.push(nextValue);
-  if (state.nameHistory.length > HISTORY_LIMIT) {
-    state.nameHistory = state.nameHistory.slice(-HISTORY_LIMIT);
+  const nameLimit = historyLimit(HISTORY_KEYS.name);
+  if (state.nameHistory.length > nameLimit) {
+    state.nameHistory = state.nameHistory.slice(-nameLimit);
   }
   saveHistory(HISTORY_KEYS.name, state.nameHistory);
   renderNameHistoryOptions();
