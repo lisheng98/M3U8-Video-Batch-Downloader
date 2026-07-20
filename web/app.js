@@ -1,3 +1,8 @@
+// Batch Downloader — 1c redesign frontend.
+// Drop-in replacement for web/app.js. Backend (yt_dlp_web.py) unchanged:
+// per-task logs are routed client-side from the "[name] " prefix the server
+// already writes on every log line.
+
 const HISTORY_KEYS = {
   url: "yt_dlp_url_history",
   name: "yt_dlp_name_history",
@@ -14,13 +19,9 @@ function historyLimit(storageKey) {
 function loadHistory(storageKey) {
   try {
     const raw = localStorage.getItem(storageKey);
-    if (!raw) {
-      return [];
-    }
+    if (!raw) return [];
     const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) {
-      return [];
-    }
+    if (!Array.isArray(parsed)) return [];
     return parsed
       .filter((value) => typeof value === "string")
       .map((value) => value.trim())
@@ -35,14 +36,19 @@ function saveHistory(storageKey, values) {
   try {
     localStorage.setItem(storageKey, JSON.stringify(values.slice(-historyLimit(storageKey))));
   } catch (_err) {
-    // Ignore storage write failures (private mode, quota, etc.).
+    // Ignore storage write failures.
   }
 }
 
+const MAX_TASK_LOG_LINES = 2000;
+
 const state = {
   tasks: [],
-  selected: new Set(),
+  selectedId: null,
+  allMode: false,
   lastLogSeq: 0,
+  globalLog: "",
+  taskLogs: new Map(), // task name -> array of lines
   defaultOutputDir: "",
   outputDirInitialized: false,
   availableFormats: ["mp4", "mkv", "webm", "mov", "original"],
@@ -55,44 +61,66 @@ const state = {
   nameHistoryIndex: null,
   nameHistoryDraft: "",
   editingTaskId: null,
-  drag: {
-    active: false,
-    startId: null,
-    additive: false,
-    baseSelection: new Set(),
-  },
+  statusTimer: null,
+  persistentStatus: "",
 };
 
 const els = {
+  metaDir: document.getElementById("meta-dir"),
+  metaFormat: document.getElementById("meta-format"),
+  settingsBtn: document.getElementById("settings-btn"),
+  settingsPanel: document.getElementById("settings-panel"),
+  settingsDoneBtn: document.getElementById("settings-done-btn"),
   outputDir: document.getElementById("output-dir"),
+  outputFormat: document.getElementById("output-format"),
   url: document.getElementById("video-url"),
   name: document.getElementById("video-name"),
   nameHistoryList: document.getElementById("video-name-history"),
-  outputFormat: document.getElementById("output-format"),
   addBtn: document.getElementById("add-task-btn"),
-  removeSelectedBtn: document.getElementById("remove-selected-btn"),
-  clearFinishedBtn: document.getElementById("clear-finished-btn"),
-  stopAllBtn: document.getElementById("stop-all-btn"),
   startBtn: document.getElementById("start-btn"),
+  stopAllBtn: document.getElementById("stop-all-btn"),
+  status: document.getElementById("status"),
+  queueCount: document.getElementById("queue-count"),
+  clearFinishedBtn: document.getElementById("clear-finished-btn"),
+  queueList: document.getElementById("queue-list"),
+  logTitle: document.getElementById("log-title"),
+  logLive: document.getElementById("log-live"),
+  allLogsBtn: document.getElementById("all-logs-btn"),
   clearLogsBtn: document.getElementById("clear-logs-btn"),
+  logs: document.getElementById("logs"),
+  logHint: document.getElementById("log-hint"),
   editModal: document.getElementById("edit-modal"),
   editTaskForm: document.getElementById("edit-task-form"),
   editUrl: document.getElementById("edit-video-url"),
   editName: document.getElementById("edit-video-name"),
   editModalCloseBtn: document.getElementById("edit-modal-close-btn"),
   editModalCancelBtn: document.getElementById("edit-modal-cancel-btn"),
-  tableBody: document.getElementById("tasks-body"),
-  logs: document.getElementById("logs"),
-  status: document.getElementById("status"),
-  statTotal: document.getElementById("stat-total"),
-  statQueued: document.getElementById("stat-queued"),
-  statRunning: document.getElementById("stat-running"),
-  statCompleted: document.getElementById("stat-completed"),
 };
 
 function setStatus(message, isError = false) {
+  clearTimeout(state.statusTimer);
+  if (!message) {
+    els.status.hidden = true;
+    return;
+  }
   els.status.textContent = message;
   els.status.classList.toggle("error", isError);
+  els.status.hidden = false;
+  if (!isError) {
+    state.statusTimer = setTimeout(() => {
+      els.status.hidden = true;
+      if (state.persistentStatus) setStatus(state.persistentStatus, true);
+    }, 3000);
+  }
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 function titleizeFormat(value) {
@@ -100,9 +128,6 @@ function titleizeFormat(value) {
 }
 
 function renderOutputFormatOptions() {
-  if (!els.outputFormat) {
-    return;
-  }
   const options = state.availableFormats
     .map((fmt) => `<option value="${escapeHtml(fmt)}">${escapeHtml(titleizeFormat(fmt))}</option>`)
     .join("");
@@ -112,37 +137,25 @@ function renderOutputFormatOptions() {
 }
 
 function renderNameHistoryOptions() {
-  if (!els.nameHistoryList) {
-    return;
-  }
   const values = [...state.nameHistory].reverse();
-  const options = values.map((value) => `<option value="${escapeHtml(value)}"></option>`).join("");
-  els.nameHistoryList.innerHTML = options;
+  els.nameHistoryList.innerHTML = values
+    .map((value) => `<option value="${escapeHtml(value)}"></option>`)
+    .join("");
 }
 
 function pushHistory(kind, value) {
   const nextValue = String(value || "").trim();
-  if (!nextValue) {
-    return;
-  }
+  if (!nextValue) return;
   if (kind === "url") {
     state.urlHistory.push(nextValue);
-    const urlLimit = historyLimit(HISTORY_KEYS.url);
-    if (state.urlHistory.length > urlLimit) {
-      state.urlHistory = state.urlHistory.slice(-urlLimit);
-    }
+    state.urlHistory = state.urlHistory.slice(-historyLimit(HISTORY_KEYS.url));
     saveHistory(HISTORY_KEYS.url, state.urlHistory);
     return;
   }
   const existingIndex = state.nameHistory.indexOf(nextValue);
-  if (existingIndex !== -1) {
-    state.nameHistory.splice(existingIndex, 1);
-  }
+  if (existingIndex !== -1) state.nameHistory.splice(existingIndex, 1);
   state.nameHistory.push(nextValue);
-  const nameLimit = historyLimit(HISTORY_KEYS.name);
-  if (state.nameHistory.length > nameLimit) {
-    state.nameHistory = state.nameHistory.slice(-nameLimit);
-  }
+  state.nameHistory = state.nameHistory.slice(-historyLimit(HISTORY_KEYS.name));
   saveHistory(HISTORY_KEYS.name, state.nameHistory);
   renderNameHistoryOptions();
 }
@@ -153,13 +166,9 @@ function setInputCursorToEnd(inputEl) {
 }
 
 function handleHistoryNavigation(event, inputEl, historyKey, indexKey, draftKey) {
-  if (event.key !== "ArrowUp" && event.key !== "ArrowDown") {
-    return false;
-  }
+  if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return false;
   const history = state[historyKey];
-  if (!Array.isArray(history) || history.length === 0) {
-    return false;
-  }
+  if (!Array.isArray(history) || history.length === 0) return false;
   if (event.key === "ArrowUp") {
     event.preventDefault();
     if (state[indexKey] === null) {
@@ -172,9 +181,7 @@ function handleHistoryNavigation(event, inputEl, historyKey, indexKey, draftKey)
     setInputCursorToEnd(inputEl);
     return true;
   }
-  if (state[indexKey] === null) {
-    return false;
-  }
+  if (state[indexKey] === null) return false;
   event.preventDefault();
   if (state[indexKey] < history.length - 1) {
     state[indexKey] += 1;
@@ -191,15 +198,9 @@ function isStartableTask(task) {
   return ["Queued", "Failed", "Cancelled"].includes(task.status);
 }
 
-function hasStartableTasks() {
-  return state.tasks.some((task) => isStartableTask(task));
-}
-
 function normalizeName(value) {
   let name = value.trim();
-  if (name.toLowerCase().endsWith(".mp4")) {
-    name = name.slice(0, -4);
-  }
+  if (name.toLowerCase().endsWith(".mp4")) name = name.slice(0, -4);
   return name.trim();
 }
 
@@ -211,186 +212,153 @@ async function api(path, method = "GET", body = null) {
   }
   const res = await fetch(path, init);
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    throw new Error(data.error || `HTTP ${res.status}`);
-  }
+  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
   return data;
 }
 
-function orderedTaskIds() {
-  return state.tasks.map((task) => task.id);
-}
-
 function getTaskById(taskId) {
-  return state.tasks.find((task) => task.id === taskId) || null;
-}
-
-function escapeHtml(value) {
-  return String(value)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
+  return state.tasks.find((task) => String(task.id) === String(taskId)) || null;
 }
 
 function statusClassName(status) {
-  return String(status || "")
-    .toLowerCase()
-    .replace(/[^a-z0-9_-]/g, "-");
+  return String(status || "").toLowerCase().replace(/[^a-z0-9_-]/g, "-");
 }
 
 function clampProgress(value) {
   const numeric = Number(value);
-  if (!Number.isFinite(numeric)) {
-    return 0;
-  }
+  if (!Number.isFinite(numeric)) return 0;
   return Math.max(0, Math.min(100, numeric));
 }
 
-function statusCellHtml(task) {
-  const statusClass = statusClassName(task.status);
-  const badge = `<span class="status-tag ${statusClass}">${escapeHtml(task.status)}</span>`;
-  if (task.status !== "Running") {
-    return badge;
+// ----- Per-task log routing -----
+
+function taskLogLines(name) {
+  if (!state.taskLogs.has(name)) state.taskLogs.set(name, []);
+  return state.taskLogs.get(name);
+}
+
+function routeLogText(text) {
+  state.globalLog += text;
+  if (state.globalLog.length > 400000) {
+    state.globalLog = state.globalLog.slice(-400000);
   }
-  const progress = clampProgress(task.progress);
-  const progressText = escapeHtml(task.progress_text || `${progress}%`);
+  const lines = String(text).split("\n");
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    const match = line.match(/^\[([^\]]+)\]\s?(.*)$/);
+    if (match && state.taskLogs.has(match[1])) {
+      const buf = taskLogLines(match[1]);
+      buf.push(match[2]);
+      if (buf.length > MAX_TASK_LOG_LINES) buf.splice(0, buf.length - MAX_TASK_LOG_LINES);
+    } else if (match) {
+      // A task name we have not seen in /api/state yet — register it anyway.
+      const buf = taskLogLines(match[1]);
+      buf.push(match[2]);
+    }
+    // Unprefixed lines (e.g. "All downloads finished.") stay global-only.
+  }
+}
+
+function registerTaskNames() {
+  for (const task of state.tasks) taskLogLines(task.name);
+}
+
+// ----- Rendering -----
+
+function cardActionsHtml(task) {
+  const buttons = [];
+  if (task.status === "Running") {
+    buttons.push(`<button type="button" data-action="stop" data-id="${task.id}">Stop</button>`);
+  } else {
+    if (isStartableTask(task)) {
+      const label = task.status === "Queued" ? "Start" : "Retry";
+      buttons.push(`<button type="button" data-action="start" data-id="${task.id}">${label}</button>`);
+    }
+    if (task.status !== "Completed") {
+      buttons.push(`<button type="button" data-action="edit" data-id="${task.id}">Edit</button>`);
+    }
+    buttons.push(`<button type="button" data-action="remove" data-id="${task.id}">Remove</button>`);
+  }
+  return buttons.join("");
+}
+
+function cardHtml(task) {
+  const selected = String(task.id) === String(state.selectedId) && !state.allMode ? " selected" : "";
+  const statusClass = statusClassName(task.status);
+  let progressHtml = "";
+  if (task.status === "Running") {
+    const progress = clampProgress(task.progress);
+    const progressText = escapeHtml(task.progress_text || `${progress}%`);
+    progressHtml = `
+      <div class="qcard-bar"><div style="width: ${progress}%"></div></div>
+      <div class="qcard-progress"><span>${progressText}</span></div>
+    `;
+  }
   return `
-    <div class="status-cell">
-      ${badge}
-      <div class="status-progress">
-        <div class="status-progress-bar" aria-hidden="true">
-          <div class="status-progress-fill" style="width: ${progress}%"></div>
-        </div>
-        <span class="status-progress-text">${progressText}</span>
+    <div class="qcard${selected}" data-id="${task.id}">
+      <div class="qcard-head">
+        <strong>${escapeHtml(task.name)}</strong>
+        <span class="pill ${statusClass}">${escapeHtml(task.status)}</span>
       </div>
+      <div class="qcard-url">${escapeHtml(task.url)}</div>
+      ${progressHtml}
+      <div class="qcard-actions">${cardActionsHtml(task)}</div>
     </div>
   `;
 }
 
-function updateActionStates() {
-  const hasSelection = state.selected.size > 0;
-  const hasRunning = state.tasks.some((task) => task.status === "Running");
-  const hasFinished = state.tasks.some((task) =>
-    ["Completed", "Failed", "Cancelled"].includes(task.status),
-  );
-  els.removeSelectedBtn.disabled = !hasSelection;
-  els.stopAllBtn.disabled = !hasRunning;
-  els.clearFinishedBtn.disabled = !hasFinished;
-}
+function renderQueue() {
+  const running = state.tasks.filter((t) => t.status === "Running").length;
+  const queued = state.tasks.filter((t) => t.status === "Queued").length;
+  const parts = [`Queue \u00b7 ${state.tasks.length}`];
+  if (running) parts.push(`${running} running`);
+  if (queued) parts.push(`${queued} queued`);
+  els.queueCount.textContent = parts.join(" \u00b7 ");
 
-function renderSummary() {
-  const summary = {
-    total: state.tasks.length,
-    queued: 0,
-    running: 0,
-    completed: 0,
-  };
-  for (const task of state.tasks) {
-    if (task.status === "Queued") {
-      summary.queued += 1;
-    } else if (task.status === "Running") {
-      summary.running += 1;
-    } else if (task.status === "Completed") {
-      summary.completed += 1;
-    }
-  }
-  if (els.statTotal) {
-    els.statTotal.textContent = String(summary.total);
-  }
-  if (els.statQueued) {
-    els.statQueued.textContent = String(summary.queued);
-  }
-  if (els.statRunning) {
-    els.statRunning.textContent = String(summary.running);
-  }
-  if (els.statCompleted) {
-    els.statCompleted.textContent = String(summary.completed);
-  }
-}
-
-function getRangeIds(firstId, lastId) {
-  const ids = orderedTaskIds();
-  const firstIdx = ids.indexOf(firstId);
-  const lastIdx = ids.indexOf(lastId);
-  if (firstIdx < 0 || lastIdx < 0) {
-    return [];
-  }
-  const [start, end] = firstIdx <= lastIdx ? [firstIdx, lastIdx] : [lastIdx, firstIdx];
-  return ids.slice(start, end + 1);
-}
-
-function applyDragSelection(currentId) {
-  const rangeIds = getRangeIds(state.drag.startId, currentId);
-  const rangeSet = new Set(rangeIds);
-  if (state.drag.additive) {
-    state.selected = new Set([...state.drag.baseSelection, ...rangeSet]);
-  } else {
-    state.selected = rangeSet;
-  }
-  renderTable();
-}
-
-function beginDragSelection(taskId, additive) {
-  state.drag.active = true;
-  state.drag.startId = taskId;
-  state.drag.additive = additive;
-  state.drag.baseSelection = additive ? new Set(state.selected) : new Set();
-  applyDragSelection(taskId);
-}
-
-function endDragSelection() {
-  state.drag.active = false;
-  state.drag.startId = null;
-  state.drag.baseSelection = new Set();
-}
-
-function rowHtml(task) {
-  const selectedClass = state.selected.has(task.id) ? "selected" : "";
-  const actionButtons = [];
-  if (task.status === "Running") {
-    actionButtons.push(`<button type="button" data-action="stop" data-id="${task.id}">Stop</button>`);
-  } else if (isStartableTask(task)) {
-    actionButtons.push(`<button type="button" data-action="start" data-id="${task.id}">Start</button>`);
-    actionButtons.push(`<button type="button" data-action="edit" data-id="${task.id}">Edit</button>`);
-    actionButtons.push(`<button type="button" data-action="remove" data-id="${task.id}">Remove</button>`);
-  } else {
-    actionButtons.push(`<button type="button" data-action="edit" data-id="${task.id}">Edit</button>`);
-    actionButtons.push(`<button type="button" data-action="remove" data-id="${task.id}">Remove</button>`);
-  }
-  return `
-    <tr data-id="${task.id}" class="${selectedClass}">
-      <td>${escapeHtml(task.url)}</td>
-      <td>${escapeHtml(task.name)}</td>
-      <td>${statusCellHtml(task)}</td>
-      <td>
-        <div class="row-actions">
-          ${actionButtons.join("")}
-        </div>
-      </td>
-    </tr>
-  `;
-}
-
-function renderTable() {
   if (state.tasks.length === 0) {
-    els.tableBody.innerHTML = `
-      <tr class="empty-state">
-        <td colspan="4">No downloads in the queue yet. Add a link and output name to get started.</td>
-      </tr>
-    `;
+    els.queueList.innerHTML = `<div class="empty">Queue is empty. Paste a link above and press Enter.</div>`;
   } else {
-    els.tableBody.innerHTML = state.tasks.map(rowHtml).join("");
+    els.queueList.innerHTML = state.tasks.map(cardHtml).join("");
   }
-  updateActionStates();
-  renderSummary();
+
+  const hasFinished = state.tasks.some((t) => ["Completed", "Failed", "Cancelled"].includes(t.status));
+  const hasRunning = running > 0;
+  els.clearFinishedBtn.disabled = !hasFinished;
+  els.stopAllBtn.disabled = !hasRunning;
+  els.startBtn.disabled = !state.tasks.some(isStartableTask);
 }
 
-function keepSelectionValid() {
-  const validIds = new Set(orderedTaskIds());
-  state.selected = new Set([...state.selected].filter((taskId) => validIds.has(taskId)));
+function renderLogPane() {
+  const stick = els.logs.scrollTop + els.logs.clientHeight >= els.logs.scrollHeight - 8;
+  els.allLogsBtn.classList.toggle("active", state.allMode);
+  if (state.allMode) {
+    els.logTitle.textContent = "all tasks (interleaved)";
+    els.logs.textContent = state.globalLog || "No activity yet.";
+    els.logLive.hidden = !state.tasks.some((t) => t.status === "Running");
+    els.logHint.textContent = "Lines prefixed with [task name]. Click a queue card for a single-task view.";
+  } else {
+    const selected = getTaskById(state.selectedId);
+    if (selected) {
+      const lines = state.taskLogs.get(selected.name) || [];
+      els.logTitle.textContent = selected.name;
+      els.logs.textContent = lines.length ? lines.join("\n") : "No log output yet \u2014 press Start.";
+      els.logLive.hidden = selected.status !== "Running";
+    } else {
+      els.logTitle.textContent = "\u2014";
+      els.logs.textContent = "Select a task on the left to view its log.";
+      els.logLive.hidden = true;
+    }
+    els.logHint.textContent = "Click a queue card to switch this pane to that task\u2019s log. No interleaving.";
+  }
+  if (stick) els.logs.scrollTop = els.logs.scrollHeight;
 }
+
+function renderMeta() {
+  els.metaDir.textContent = els.outputDir.value.trim() || state.defaultOutputDir || "~/Downloads";
+  els.metaFormat.textContent = titleizeFormat(els.outputFormat.value || state.defaultOutputFormat || "mp4");
+}
+
+// ----- Server sync -----
 
 async function refreshState() {
   try {
@@ -413,11 +381,18 @@ async function refreshState() {
       state.outputFormatInitialized = true;
     }
     state.tasks = data.tasks || [];
-    keepSelectionValid();
-    renderTable();
-    els.startBtn.disabled = !hasStartableTasks();
+    registerTaskNames();
+    if (state.selectedId !== null && !getTaskById(state.selectedId)) {
+      state.selectedId = null;
+    }
+    renderQueue();
+    renderLogPane();
+    renderMeta();
     if (!data.yt_dlp_found) {
-      setStatus("yt-dlp is not found. Install it with: brew install yt-dlp", true);
+      state.persistentStatus = "yt-dlp is not found. Install it with: brew install yt-dlp";
+      setStatus(state.persistentStatus, true);
+    } else {
+      state.persistentStatus = "";
     }
   } catch (err) {
     setStatus(err.message, true);
@@ -430,21 +405,16 @@ async function pollLogs() {
     const rows = Array.isArray(data.rows) ? data.rows : [];
     let maxSeenSeq = state.lastLogSeq;
     if (rows.length > 0) {
-      const shouldStick = els.logs.scrollTop + els.logs.clientHeight >= els.logs.scrollHeight - 8;
       for (const row of rows) {
         const seq = Number(row.seq);
         if (Number.isFinite(seq)) {
-          if (seq <= state.lastLogSeq) {
-            continue;
-          }
+          if (seq <= state.lastLogSeq) continue;
           maxSeenSeq = Math.max(maxSeenSeq, seq);
         }
-        els.logs.textContent += row.text;
+        routeLogText(row.text);
       }
       state.lastLogSeq = maxSeenSeq;
-      if (shouldStick) {
-        els.logs.scrollTop = els.logs.scrollHeight;
-      }
+      renderLogPane();
     } else {
       const nextSeq = Number(data.last_seq);
       if (Number.isFinite(nextSeq) && nextSeq > state.lastLogSeq) {
@@ -456,29 +426,7 @@ async function pollLogs() {
   }
 }
 
-async function addTask() {
-  const url = els.url.value.trim();
-  const name = normalizeName(els.name.value);
-  if (!url || !name) {
-    setStatus("Link and video name are required.", true);
-    return;
-  }
-  try {
-    await api("/api/tasks", "POST", { url, name });
-    pushHistory("url", url);
-    pushHistory("name", name);
-    state.urlHistoryIndex = null;
-    state.nameHistoryIndex = null;
-    state.urlHistoryDraft = "";
-    state.nameHistoryDraft = "";
-    els.url.value = "";
-    els.name.value = "";
-    setStatus("Task added.");
-    await refreshState();
-  } catch (err) {
-    setStatus(err.message, true);
-  }
-}
+// ----- Actions -----
 
 function getDownloadSettings() {
   return {
@@ -487,18 +435,47 @@ function getDownloadSettings() {
   };
 }
 
+async function addTask() {
+  const url = els.url.value.trim();
+  const name = normalizeName(els.name.value);
+  if (!url || !name) {
+    setStatus("Link and video name are required.", true);
+    return;
+  }
+  try {
+    const data = await api("/api/tasks", "POST", { url, name });
+    pushHistory("url", url);
+    pushHistory("name", name);
+    state.urlHistoryIndex = null;
+    state.nameHistoryIndex = null;
+    state.urlHistoryDraft = "";
+    state.nameHistoryDraft = "";
+    els.url.value = "";
+    els.name.value = "";
+    if (data && data.task && data.task.id !== undefined) {
+      state.selectedId = data.task.id;
+      state.allMode = false;
+    }
+    setStatus("Task added.");
+    await refreshState();
+    if (state.selectedId === null && state.tasks.length > 0) {
+      state.selectedId = state.tasks[state.tasks.length - 1].id;
+      renderQueue();
+      renderLogPane();
+    }
+  } catch (err) {
+    setStatus(err.message, true);
+  }
+}
+
 async function startDownloads() {
-  if (!hasStartableTasks()) {
+  if (!state.tasks.some(isStartableTask)) {
     setStatus("No queued downloads found.");
     return;
   }
   try {
     const data = await api("/api/start", "POST", getDownloadSettings());
-    if ((data.started || 0) > 0) {
-      setStatus(`Started ${data.started} download(s).`);
-    } else {
-      setStatus("No queued downloads found.");
-    }
+    setStatus((data.started || 0) > 0 ? `Started ${data.started} download(s).` : "No queued downloads found.");
     await refreshState();
   } catch (err) {
     setStatus(err.message, true);
@@ -507,11 +484,11 @@ async function startDownloads() {
 
 async function startTask(taskId) {
   const task = getTaskById(taskId);
-  if (!task || !isStartableTask(task)) {
-    return;
-  }
+  if (!task || !isStartableTask(task)) return;
   try {
     await api(`/api/tasks/${taskId}/start`, "POST", getDownloadSettings());
+    state.selectedId = taskId;
+    state.allMode = false;
     setStatus(`Started ${task.name}.`);
     await refreshState();
   } catch (err) {
@@ -519,16 +496,12 @@ async function startTask(taskId) {
   }
 }
 
-async function removeSelected() {
-  const ids = [...state.selected];
-  if (ids.length === 0) {
-    setStatus("No rows selected.", true);
-    return;
-  }
+async function stopTask(taskId) {
+  const task = getTaskById(taskId);
+  if (!task || task.status !== "Running") return;
   try {
-    const data = await api("/api/remove", "POST", { ids });
-    state.selected = new Set();
-    setStatus(`Removed ${data.removed} row(s).`);
+    await api(`/api/tasks/${taskId}/stop`, "POST", {});
+    setStatus(`Stop requested for ${task.name}.`);
     await refreshState();
   } catch (err) {
     setStatus(err.message, true);
@@ -538,22 +511,8 @@ async function removeSelected() {
 async function removeOne(taskId) {
   try {
     const data = await api("/api/remove", "POST", { ids: [taskId] });
-    state.selected.delete(taskId);
+    if (String(state.selectedId) === String(taskId)) state.selectedId = null;
     setStatus(`Removed ${data.removed} row(s).`);
-    await refreshState();
-  } catch (err) {
-    setStatus(err.message, true);
-  }
-}
-
-async function stopTask(taskId) {
-  const task = getTaskById(taskId);
-  if (!task || task.status !== "Running") {
-    return;
-  }
-  try {
-    await api(`/api/tasks/${taskId}/stop`, "POST", {});
-    setStatus(`Stop requested for ${task.name}.`);
     await refreshState();
   } catch (err) {
     setStatus(err.message, true);
@@ -582,26 +541,34 @@ async function stopAllRunning() {
 
 async function clearLogs() {
   try {
-    try {
-      await api("/api/logs/clear", "POST", {});
-    } catch (err) {
-      if (!String(err.message || "").includes("404")) {
-        throw err;
+    if (state.allMode) {
+      try {
+        await api("/api/logs/clear", "POST", {});
+      } catch (err) {
+        if (!String(err.message || "").includes("404")) throw err;
+        await api("/api/clear-logs", "POST", {});
       }
-      await api("/api/clear-logs", "POST", {});
+      state.lastLogSeq = 0;
+      state.globalLog = "";
+      state.taskLogs = new Map();
+      registerTaskNames();
+      setStatus("Logs cleared.");
+    } else {
+      const selected = getTaskById(state.selectedId);
+      if (selected) {
+        state.taskLogs.set(selected.name, []);
+        setStatus(`Cleared log view for ${selected.name}.`);
+      }
     }
-    state.lastLogSeq = 0;
-    els.logs.textContent = "";
-    setStatus("Logs cleared.");
+    renderLogPane();
   } catch (err) {
     setStatus(err.message, true);
   }
 }
 
+// ----- Edit modal -----
+
 function closeEditModal() {
-  if (!els.editModal) {
-    return;
-  }
   els.editModal.hidden = true;
   state.editingTaskId = null;
   els.editUrl.value = "";
@@ -610,22 +577,18 @@ function closeEditModal() {
 
 function openEditModal(taskId) {
   const task = getTaskById(taskId);
-  if (!task || !els.editModal) {
-    return;
-  }
+  if (!task) return;
   state.editingTaskId = taskId;
   els.editUrl.value = task.url;
   els.editName.value = task.name;
   els.editModal.hidden = false;
   els.editUrl.focus();
-  els.editUrl.setSelectionRange(els.editUrl.value.length, els.editUrl.value.length);
+  setInputCursorToEnd(els.editUrl);
 }
 
 async function submitEditTask(event) {
   event.preventDefault();
-  if (!state.editingTaskId) {
-    return;
-  }
+  if (!state.editingTaskId) return;
   const nextUrl = els.editUrl.value.trim();
   const nextName = normalizeName(els.editName.value);
   if (!nextUrl || !nextName) {
@@ -642,22 +605,37 @@ async function submitEditTask(event) {
   }
 }
 
+// ----- Events -----
+
 function bindEvents() {
   renderNameHistoryOptions();
 
+  els.settingsBtn.addEventListener("click", () => {
+    els.settingsPanel.hidden = !els.settingsPanel.hidden;
+  });
+  els.settingsDoneBtn.addEventListener("click", () => {
+    els.settingsPanel.hidden = true;
+    renderMeta();
+  });
+  els.outputDir.addEventListener("input", renderMeta);
+  els.outputFormat.addEventListener("change", renderMeta);
+
   els.addBtn.addEventListener("click", addTask);
   els.startBtn.addEventListener("click", startDownloads);
-  els.removeSelectedBtn.addEventListener("click", removeSelected);
-  els.clearFinishedBtn.addEventListener("click", clearFinished);
   els.stopAllBtn.addEventListener("click", stopAllRunning);
+  els.clearFinishedBtn.addEventListener("click", clearFinished);
   els.clearLogsBtn.addEventListener("click", clearLogs);
+  els.allLogsBtn.addEventListener("click", () => {
+    state.allMode = !state.allMode;
+    renderQueue();
+    renderLogPane();
+  });
+
   els.editTaskForm.addEventListener("submit", submitEditTask);
   els.editModalCloseBtn.addEventListener("click", closeEditModal);
   els.editModalCancelBtn.addEventListener("click", closeEditModal);
   els.editModal.addEventListener("click", (event) => {
-    if (event.target.dataset.action === "close-edit-modal") {
-      closeEditModal();
-    }
+    if (event.target.dataset.action === "close-edit-modal") closeEditModal();
   });
 
   els.url.addEventListener("keydown", (event) => {
@@ -668,84 +646,44 @@ function bindEvents() {
     }
     handleHistoryNavigation(event, els.url, "urlHistory", "urlHistoryIndex", "urlHistoryDraft");
   });
-
   els.url.addEventListener("input", () => {
     state.urlHistoryIndex = null;
     state.urlHistoryDraft = els.url.value;
   });
-
-  els.name.addEventListener("input", () => {
-    state.nameHistoryIndex = null;
-    state.nameHistoryDraft = els.name.value;
-  });
-
   els.name.addEventListener("keydown", (event) => {
     if (event.key === "Enter") {
       event.preventDefault();
       addTask();
       return;
     }
-
-    if (handleHistoryNavigation(event, els.name, "nameHistory", "nameHistoryIndex", "nameHistoryDraft")) {
-      return;
-    }
+    handleHistoryNavigation(event, els.name, "nameHistory", "nameHistoryIndex", "nameHistoryDraft");
+  });
+  els.name.addEventListener("input", () => {
+    state.nameHistoryIndex = null;
+    state.nameHistoryDraft = els.name.value;
   });
 
-  els.tableBody.addEventListener("mousedown", (event) => {
-    if (event.button !== 0) {
+  els.queueList.addEventListener("click", (event) => {
+    const actionBtn = event.target.closest("button[data-action]");
+    if (actionBtn) {
+      const taskId = actionBtn.dataset.id;
+      const action = actionBtn.dataset.action;
+      if (action === "start") startTask(taskId);
+      else if (action === "stop") stopTask(taskId);
+      else if (action === "edit") openEditModal(taskId);
+      else if (action === "remove") removeOne(taskId);
       return;
     }
-    if (event.target.closest("button")) {
-      return;
-    }
-    const row = event.target.closest("tr[data-id]");
-    if (!row) {
-      return;
-    }
-    const taskId = row.dataset.id;
-    const additive = event.metaKey || event.ctrlKey;
-    beginDragSelection(taskId, additive);
-    event.preventDefault();
-  });
-
-  els.tableBody.addEventListener("mouseover", (event) => {
-    if (!state.drag.active) {
-      return;
-    }
-    const row = event.target.closest("tr[data-id]");
-    if (!row) {
-      return;
-    }
-    const taskId = row.dataset.id;
-    applyDragSelection(taskId);
-  });
-
-  document.addEventListener("mouseup", () => {
-    endDragSelection();
+    const card = event.target.closest(".qcard[data-id]");
+    if (!card) return;
+    state.selectedId = card.dataset.id;
+    state.allMode = false;
+    renderQueue();
+    renderLogPane();
   });
 
   document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape" && els.editModal && !els.editModal.hidden) {
-      closeEditModal();
-    }
-  });
-
-  els.tableBody.addEventListener("click", (event) => {
-    const actionBtn = event.target.closest("button[data-action]");
-    if (!actionBtn) {
-      return;
-    }
-    const taskId = actionBtn.dataset.id;
-    const action = actionBtn.dataset.action;
-    if (action === "start") {
-      startTask(taskId);
-    } else if (action === "stop") {
-      stopTask(taskId);
-    } else if (action === "edit") {
-      openEditModal(taskId);
-    } else if (action === "remove") {
-      removeOne(taskId);
-    }
+    if (event.key === "Escape" && !els.editModal.hidden) closeEditModal();
   });
 }
 
