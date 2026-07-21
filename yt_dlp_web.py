@@ -42,6 +42,19 @@ COOKIES_RETRY_RE = re.compile(
     re.IGNORECASE,
 )
 
+# An edge/CDN refusal (Cloudflare et al). Distinct from COOKIES_RETRY_RE: the site
+# never says "use --cookies", it just slams the door, so the cookie escalation
+# below has to be triggered on the bare status code instead.
+BLOCKED_RE = re.compile(
+    r"HTTP Error 40[13]"
+    r"|HTTPError 40[13]"
+    r"|attention required"
+    r"|just a moment"
+    r"|cf-browser-verification"
+    r"|cloudflare",
+    re.IGNORECASE,
+)
+
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -379,7 +392,7 @@ class DownloadManager:
                 raise RuntimeError("Task is not running.")
             return task.to_json()
 
-    def _run_attempt(self, task_id: str, name: str, cmd: list[str]) -> tuple[int, bool]:
+    def _run_attempt(self, task_id: str, name: str, cmd: list[str]) -> tuple[int, bool, bool]:
         cmd_text = " ".join(shlex.quote(part) for part in cmd)
         self.log(f"\n[{name}] {cmd_text}\n")
 
@@ -398,12 +411,15 @@ class DownloadManager:
             proc.terminate()
 
         needs_cookies = False
+        blocked = False
         assert proc.stdout is not None
         last_progress_line: str | None = None
         for line in proc.stdout:
             clean = line.rstrip("\r\n")
             if COOKIES_RETRY_RE.search(clean):
                 needs_cookies = True
+            if BLOCKED_RE.search(clean):
+                blocked = True
             if clean.startswith("[download]"):
                 if clean == last_progress_line:
                     continue
@@ -420,7 +436,7 @@ class DownloadManager:
                 last_progress_line = None
             self.log(f"[{name}] {clean}\n")
 
-        return proc.wait(), needs_cookies
+        return proc.wait(), needs_cookies, blocked
 
     def _run_one(self, task_id: str, output_dir: Path, output_format: str) -> None:
         final_status = "Failed"
@@ -465,7 +481,21 @@ class DownloadManager:
             cmd.extend(["--merge-output-format", output_format, "--remux-video", output_format])
 
         try:
-            code, needs_cookies = self._run_attempt(task_id, name, cmd)
+            code, needs_cookies, blocked = self._run_attempt(task_id, name, cmd)
+
+            # A bare 403 carries no "use --cookies" hint, so the escalation below has
+            # to be triggered on the status code. But it is a long shot -- it only pays
+            # off if the browser holds a clearance cookie from a challenge already
+            # passed on this same IP -- and reading a cookie jar costs a keychain
+            # prompt. So try exactly one browser, not every browser on the machine.
+            cookies_are_a_long_shot = code != 0 and blocked and not needs_cookies
+            if cookies_are_a_long_shot:
+                self.log(
+                    f"[{name}] The site's CDN refused the request (403) before reading the link. "
+                    "That is an edge/IP-level block, not a bad link. "
+                    "Trying your browser's session cookies once, in case it holds a clearance cookie.\n"
+                )
+                needs_cookies = True
 
             if code != 0 and needs_cookies:
                 browsers = detect_cookie_browsers()
@@ -493,17 +523,26 @@ class DownloadManager:
                         f"Retrying with cookies from {browser.capitalize()}{keychain_hint}.\n"
                     )
                     attempted.append(browser)
-                    code, needs_cookies = self._run_attempt(
+                    code, needs_cookies, blocked = self._run_attempt(
                         task_id, name, cmd + ["--cookies-from-browser", browser]
                     )
-                    if code == 0 or not needs_cookies:
+                    if code == 0 or not needs_cookies or cookies_are_a_long_shot:
                         break
                 if code != 0 and needs_cookies and attempted:
-                    self.log(
-                        f"[{name}] Still blocked after trying cookies from: "
-                        f"{', '.join(browser.capitalize() for browser in attempted)}. "
-                        "Make sure you are signed in to the site in one of those browsers.\n"
-                    )
+                    tried = ", ".join(browser.capitalize() for browser in attempted)
+                    if blocked:
+                        self.log(
+                            f"[{name}] Still refused by the CDN after trying cookies from: {tried}. "
+                            "A clearance cookie is tied to the IP that earned it, so it only helps if "
+                            "this machine is on the same connection as the browser. What actually works: "
+                            "turn the VPN on, then re-grab a fresh link with the Grab .m3u8 bookmarklet "
+                            "in that same browser (see grab-m3u8-bookmarklet.md).\n"
+                        )
+                    else:
+                        self.log(
+                            f"[{name}] Still blocked after trying cookies from: {tried}. "
+                            "Make sure you are signed in to the site in one of those browsers.\n"
+                        )
 
             with self.lock:
                 was_cancelled = task_id in self.cancel_requested

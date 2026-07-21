@@ -62,6 +62,7 @@ const state = {
   nameHistoryDraft: "",
   editingTaskId: null,
   statusTimer: null,
+  copyLabelTimer: null,
   persistentStatus: "",
 };
 
@@ -86,6 +87,7 @@ const els = {
   logTitle: document.getElementById("log-title"),
   logLive: document.getElementById("log-live"),
   allLogsBtn: document.getElementById("all-logs-btn"),
+  copyLogsBtn: document.getElementById("copy-logs-btn"),
   clearLogsBtn: document.getElementById("clear-logs-btn"),
   logs: document.getElementById("logs"),
   logHint: document.getElementById("log-hint"),
@@ -328,12 +330,31 @@ function renderQueue() {
   els.startBtn.disabled = !state.tasks.some(isStartableTask);
 }
 
+// True while the user is holding a highlight inside the log pane. Rewriting
+// textContent under them replaces the text node the selection anchors to, which
+// is what used to make a highlight vanish a moment after they made it.
+function hasSelectionInLogs() {
+  const selection = window.getSelection();
+  if (!selection || selection.isCollapsed || selection.rangeCount === 0) return false;
+  return els.logs.contains(selection.getRangeAt(0).commonAncestorContainer);
+}
+
+// Returns true only when the DOM actually changed, so the caller knows whether
+// re-sticking the scroll position is warranted.
+function setLogText(text) {
+  if (els.logs.textContent === text) return false;
+  if (hasSelectionInLogs()) return false; // next poll repaints once they let go
+  els.logs.textContent = text;
+  return true;
+}
+
 function renderLogPane() {
   const stick = els.logs.scrollTop + els.logs.clientHeight >= els.logs.scrollHeight - 8;
   els.allLogsBtn.classList.toggle("active", state.allMode);
+  let changed = false;
   if (state.allMode) {
     els.logTitle.textContent = "all tasks (interleaved)";
-    els.logs.textContent = state.globalLog || "No activity yet.";
+    changed = setLogText(state.globalLog || "No activity yet.");
     els.logLive.hidden = !state.tasks.some((t) => t.status === "Running");
     els.logHint.textContent = "Lines prefixed with [task name]. Click a queue card for a single-task view.";
   } else {
@@ -341,16 +362,16 @@ function renderLogPane() {
     if (selected) {
       const lines = state.taskLogs.get(selected.name) || [];
       els.logTitle.textContent = selected.name;
-      els.logs.textContent = lines.length ? lines.join("\n") : "No log output yet \u2014 press Start.";
+      changed = setLogText(lines.length ? lines.join("\n") : "No log output yet \u2014 press Start.");
       els.logLive.hidden = selected.status !== "Running";
     } else {
       els.logTitle.textContent = "\u2014";
-      els.logs.textContent = "Select a task on the left to view its log.";
+      changed = setLogText("Select a task on the left to view its log.");
       els.logLive.hidden = true;
     }
     els.logHint.textContent = "Click a queue card to switch this pane to that task\u2019s log. No interleaving.";
   }
-  if (stick) els.logs.scrollTop = els.logs.scrollHeight;
+  if (stick && changed) els.logs.scrollTop = els.logs.scrollHeight;
 }
 
 function renderMeta() {
@@ -539,6 +560,51 @@ async function stopAllRunning() {
   }
 }
 
+function currentLogText() {
+  if (state.allMode) return state.globalLog;
+  const selected = getTaskById(state.selectedId);
+  if (!selected) return "";
+  return (state.taskLogs.get(selected.name) || []).join("\n");
+}
+
+async function writeClipboard(text) {
+  if (navigator.clipboard && window.isSecureContext) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  // http:// on a LAN address has no async clipboard — fall back to execCommand.
+  const scratch = document.createElement("textarea");
+  scratch.value = text;
+  scratch.setAttribute("readonly", "");
+  scratch.style.position = "fixed";
+  scratch.style.opacity = "0";
+  document.body.appendChild(scratch);
+  scratch.select();
+  const ok = document.execCommand("copy");
+  document.body.removeChild(scratch);
+  if (!ok) throw new Error("Clipboard write was blocked by the browser.");
+}
+
+async function copyLogs() {
+  const text = currentLogText();
+  if (!text.trim()) {
+    setStatus("Nothing to copy yet.", true);
+    return;
+  }
+  try {
+    await writeClipboard(text);
+    const lineCount = text.trimEnd().split("\n").length;
+    setStatus(`Copied ${lineCount} log line(s).`);
+    els.copyLogsBtn.textContent = "Copied";
+    clearTimeout(state.copyLabelTimer);
+    state.copyLabelTimer = setTimeout(() => {
+      els.copyLogsBtn.textContent = "Copy";
+    }, 1500);
+  } catch (err) {
+    setStatus(err.message, true);
+  }
+}
+
 async function clearLogs() {
   try {
     if (state.allMode) {
@@ -624,6 +690,7 @@ function bindEvents() {
   els.startBtn.addEventListener("click", startDownloads);
   els.stopAllBtn.addEventListener("click", stopAllRunning);
   els.clearFinishedBtn.addEventListener("click", clearFinished);
+  els.copyLogsBtn.addEventListener("click", copyLogs);
   els.clearLogsBtn.addEventListener("click", clearLogs);
   els.allLogsBtn.addEventListener("click", () => {
     state.allMode = !state.allMode;
