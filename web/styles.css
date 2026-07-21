@@ -27,13 +27,18 @@
 
 body {
   margin: 0;
-  min-height: 100vh;
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
   display: flex;
   flex-direction: column;
   background: var(--bg);
   color: var(--text);
   font-family: var(--font);
 }
+
+/* Chrome above the split never shrinks; the split absorbs the leftover space. */
+.top, .settings, .status, .addbar { flex: none; }
 
 .mono { font-family: var(--mono); }
 
@@ -181,8 +186,10 @@ input:focus, select:focus {
 .split {
   display: grid;
   grid-template-columns: 460px 1fr;
+  grid-template-rows: minmax(0, 1fr);
   flex: 1;
   min-height: 0;
+  overflow: hidden;
 }
 
 /* Queue */
@@ -190,6 +197,7 @@ input:focus, select:focus {
   border-right: 1px solid var(--line);
   padding: 12px;
   display: flex; flex-direction: column; gap: 8px;
+  min-height: 0;
   overflow: auto;
 }
 
@@ -277,9 +285,11 @@ input:focus, select:focus {
   display: flex; flex-direction: column;
   background: var(--log-bg);
   min-height: 0;
+  overflow: hidden;
 }
 
 .logpane-head {
+  flex: none;
   display: flex; justify-content: space-between; align-items: center;
   padding: 10px 14px;
   border-bottom: 1px solid var(--log-line);
@@ -307,9 +317,11 @@ input:focus, select:focus {
 
 pre#logs {
   flex: 1;
+  min-height: 0;
   margin: 0;
   padding: 12px 14px;
   overflow: auto;
+  overflow-wrap: anywhere;
   font-family: var(--mono);
   font-size: 11.5px;
   line-height: 1.6;
@@ -318,6 +330,7 @@ pre#logs {
 }
 
 .logpane-foot {
+  flex: none;
   padding: 8px 14px;
   border-top: 1px solid var(--log-line);
   font-family: var(--mono);
@@ -348,8 +361,8 @@ pre#logs {
 .modal-actions { display: flex; justify-content: end; gap: 8px; margin-top: 4px; }
 
 @media (max-width: 900px) {
-  .split { grid-template-columns: 1fr; }
-  .queue { border-right: none; border-bottom: 1px solid var(--line); max-height: 50vh; }
+  .split { grid-template-columns: 1fr; grid-template-rows: minmax(0, auto) minmax(0, 1fr); }
+  .queue { border-right: none; border-bottom: 1px solid var(--line); max-height: 40vh; }
   .addbar { flex-wrap: wrap; }
   .addbar #video-url { flex: 1 1 100%; }
 }
