@@ -164,7 +164,7 @@ input:focus, select:focus {
 
 .addbar input { background: oklch(0.985 0.003 250); padding: 9px 12px; }
 .addbar #video-url { flex: 1; }
-.addbar #video-name { width: 220px; }
+.addbar #video-name { width: 480px; }
 .addbar .divider { width: 1px; height: 24px; background: var(--line); margin: 0 4px; }
 
 /* Status toast */

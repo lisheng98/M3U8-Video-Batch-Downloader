@@ -1,107 +1,100 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Batch Downloader</title>
-    <link rel="stylesheet" href="/styles.css" />
-  </head>
-  <body>
-    <header class="top">
-      <div class="brand">
-        <div class="logo">&#8595;</div>
-        <strong>Batch Downloader</strong>
-        <span class="host-badge">127.0.0.1:8765</span>
-      </div>
-      <div class="top-meta">
-        <span id="meta-dir" class="mono">~/Downloads</span>
-        <span class="dot">&middot;</span>
-        <span id="meta-format">MP4</span>
-        <button id="settings-btn" type="button">Settings</button>
-      </div>
-    </header>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Batch Downloader</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <div class="logo">&#8595;</div>
+      <strong>Batch Downloader</strong>
+      <span class="host-badge">127.0.0.1:8765</span>
+    </div>
+    <div class="top-meta">
+      <span class="mono" id="meta-dir">~/Downloads</span>
+      <span class="dot">&#183;</span>
+      <span id="meta-format">MP4</span>
+      <button type="button" id="settings-btn">Settings</button>
+    </div>
+  </header>
 
-    <section id="settings-panel" class="settings" hidden>
-      <div class="settings-field grow">
-        <label for="output-dir">Output folder</label>
-        <input id="output-dir" type="text" placeholder="~/Downloads" class="mono" />
+  <section class="settings" id="settings-panel" hidden>
+    <div class="settings-field grow">
+      <label for="output-dir">Output folder</label>
+      <input type="text" id="output-dir" class="mono" placeholder="~/Downloads" autocomplete="off">
+    </div>
+    <div class="settings-field">
+      <label for="output-format">Output format</label>
+      <select id="output-format"></select>
+    </div>
+    <button type="button" id="settings-done-btn">Done</button>
+  </section>
+
+  <div class="status" id="status" hidden></div>
+
+  <div class="addbar">
+    <input type="text" id="video-url" placeholder="Paste .m3u8 link&#8230;" autocomplete="off" spellcheck="false">
+    <input type="text" id="video-name" placeholder="video_name" autocomplete="off" spellcheck="false" list="video-name-history">
+    <datalist id="video-name-history"></datalist>
+    <button type="button" id="add-task-btn" class="primary">Add</button>
+    <div class="divider"></div>
+    <button type="button" id="start-btn" class="outline">Start all</button>
+    <button type="button" id="stop-all-btn">Stop all</button>
+  </div>
+
+  <main class="split">
+    <section class="queue">
+      <div class="queue-head">
+        <span class="queue-label" id="queue-count">Queue &#183; 0</span>
+        <button type="button" id="clear-finished-btn" class="linklike">Clear finished</button>
       </div>
-      <div class="settings-field">
-        <label for="output-format">Output format</label>
-        <select id="output-format">
-          <option value="mp4">MP4</option>
-          <option value="mkv">MKV</option>
-          <option value="webm">WEBM</option>
-          <option value="mov">MOV</option>
-          <option value="original">Original (source)</option>
-        </select>
-      </div>
-      <button id="settings-done-btn" type="button">Done</button>
+      <div class="queue-list" id="queue-list"></div>
     </section>
 
-    <div class="addbar">
-      <input id="video-url" type="text" placeholder="Paste .m3u8 link&hellip;" />
-      <input id="video-name" type="text" placeholder="video_name" list="video-name-history" />
-      <datalist id="video-name-history"></datalist>
-      <button id="add-task-btn" class="primary">Add</button>
-      <div class="divider"></div>
-      <button id="start-btn" class="outline">Start all</button>
-      <button id="stop-all-btn">Stop all</button>
-    </div>
-
-    <div id="status" class="status" hidden></div>
-
-    <main class="split">
-      <aside class="queue">
-        <div class="queue-head">
-          <span id="queue-count" class="queue-label">Queue &middot; 0</span>
-          <button id="clear-finished-btn" class="linklike" type="button">Clear finished</button>
+    <section class="logpane">
+      <div class="logpane-head">
+        <div class="logpane-title">
+          <span class="queue-label">Log</span>
+          <span class="mono" id="log-title">&#8212;</span>
+          <span class="live" id="log-live" hidden>&#9679; live</span>
         </div>
-        <div id="queue-list" class="queue-list">
-          <div class="empty">Queue is empty. Paste a link above and press Enter.</div>
+        <div class="logpane-actions">
+          <button type="button" id="all-logs-btn">All tasks</button>
+          <button type="button" id="clear-logs-btn">Clear</button>
         </div>
-      </aside>
-      <section class="logpane">
-        <div class="logpane-head">
-          <div class="logpane-title">
-            <span class="queue-label">Log</span>
-            <span id="log-title" class="mono">&mdash;</span>
-            <span id="log-live" class="live" hidden>&#9679; live</span>
-          </div>
-          <div class="logpane-actions">
-            <button id="all-logs-btn" type="button">All tasks</button>
-            <button id="clear-logs-btn" type="button">Clear</button>
-          </div>
-        </div>
-        <pre id="logs"></pre>
-        <div id="log-hint" class="logpane-foot">Click a queue card to switch this pane to that task&rsquo;s log. No interleaving.</div>
-      </section>
-    </main>
-
-    <div id="edit-modal" class="modal" hidden>
-      <div class="modal-backdrop" data-action="close-edit-modal"></div>
-      <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="edit-modal-title">
-        <div class="modal-head">
-          <h2 id="edit-modal-title">Edit queue item</h2>
-          <button id="edit-modal-close-btn" type="button">Close</button>
-        </div>
-        <form id="edit-task-form" class="modal-form">
-          <div>
-            <label for="edit-video-url">Link (.m3u8)</label>
-            <input id="edit-video-url" type="text" class="mono" />
-          </div>
-          <div>
-            <label for="edit-video-name">Video name</label>
-            <input id="edit-video-name" type="text" />
-          </div>
-          <div class="modal-actions">
-            <button id="edit-modal-cancel-btn" type="button">Cancel</button>
-            <button id="edit-modal-save-btn" type="submit" class="primary">Save changes</button>
-          </div>
-        </form>
       </div>
-    </div>
+      <pre id="logs">Select a task on the left to view its log.</pre>
+      <div class="logpane-foot" id="log-hint"></div>
+    </section>
+  </main>
 
-    <script src="/app.js"></script>
-  </body>
+  <div class="modal" id="edit-modal" hidden>
+    <div class="modal-backdrop" data-action="close-edit-modal"></div>
+    <div class="modal-card">
+      <div class="modal-head">
+        <h2>Edit task</h2>
+        <button type="button" id="edit-modal-close-btn" class="linklike">Close</button>
+      </div>
+      <form class="modal-form" id="edit-task-form">
+        <div>
+          <label for="edit-video-url">Link</label>
+          <input type="text" id="edit-video-url" class="mono" placeholder="Link (.m3u8)" autocomplete="off" spellcheck="false">
+        </div>
+        <div>
+          <label for="edit-video-name">Video name</label>
+          <input type="text" id="edit-video-name" placeholder="video_name" autocomplete="off" spellcheck="false">
+        </div>
+        <div class="modal-actions">
+          <button type="button" id="edit-modal-cancel-btn">Cancel</button>
+          <button type="submit" class="primary">Save</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
 </html>
