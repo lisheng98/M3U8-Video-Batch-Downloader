@@ -22,9 +22,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-SUPPORTED_OUTPUT_FORMATS = ("mp4", "mkv", "webm", "mov", "original")
+SUPPORTED_OUTPUT_FORMATS = ("mp4", "mp3", "mkv", "webm", "mov", "original")
+AUDIO_OUTPUT_FORMATS = {"mp3"}
+AUDIO_SUFFIXES = frozenset(f".{fmt}" for fmt in AUDIO_OUTPUT_FORMATS)
 DEFAULT_OUTPUT_FORMAT = "mp4"
-NORMALIZED_EXTENSIONS = {"mp4", "mkv", "webm", "mov", "avi", "flv", "m4v"}
+NORMALIZED_EXTENSIONS = {"mp4", "mkv", "webm", "mov", "avi", "flv", "m4v", "mp3"}
 DOWNLOAD_PROGRESS_RE = re.compile(
     r"^\[download\]\s+(\d+(?:\.\d+)?)%(?:\s+of\s+(~)?\s*([0-9.]+)\s*([A-Za-z]+))?"
 )
@@ -138,17 +140,30 @@ class Task:
     id: str
     url: str
     name: str
+    output_format: str = DEFAULT_OUTPUT_FORMAT
     status: str = "Queued"
     progress: float = 0.0
     progress_text: str = ""
     created_at: str = field(default_factory=utc_now_iso)
     updated_at: str = field(default_factory=utc_now_iso)
 
+    @property
+    def is_audio(self) -> bool:
+        return self.output_format in AUDIO_OUTPUT_FORMATS
+
+    @property
+    def log_label(self) -> str:
+        # A video and an audio task may share a name, so audio lines carry the extension
+        # to keep the two logs apart.
+        return f"{self.name}.{self.output_format}" if self.is_audio else self.name
+
     def to_json(self) -> dict:
         return {
             "id": self.id,
             "url": self.url,
             "name": self.name,
+            "output_format": self.output_format,
+            "log_label": self.log_label,
             "status": self.status,
             "progress": self.progress,
             "progress_text": self.progress_text,
@@ -180,20 +195,46 @@ class DownloadManager:
         literal_name = glob.escape(name)
         return {path for path in output_dir.glob(f"{literal_name}.*") if path.is_file()}
 
-    def _find_task_by_name_locked(self, name: str, *, ignore_task_id: str | None = None) -> Task | None:
+    def _find_conflicting_task_locked(
+        self, name: str, output_format: str, *, ignore_task_id: str | None = None
+    ) -> Task | None:
+        # One video and one audio task may share a name: they end up as NAME.mp4 and NAME.mp3.
         wanted = name.casefold()
+        wanted_audio = output_format in AUDIO_OUTPUT_FORMATS
         for existing_id in self.task_order:
             if existing_id == ignore_task_id:
                 continue
             task = self.tasks.get(existing_id)
-            if task is not None and task.name.casefold() == wanted:
+            if task is not None and task.name.casefold() == wanted and task.is_audio == wanted_audio:
                 return task
         return None
 
-    def _cleanup_cancelled_outputs(self, output_dir: Path, name: str, existing_files: set[Path]) -> list[str]:
+    @staticmethod
+    def _conflict_message(output_format: str) -> str:
+        kind = "An audio" if output_format in AUDIO_OUTPUT_FORMATS else "A video"
+        return f"{kind} task with this name is already in the queue."
+
+    def _publish_staged_audio(self, label: str, work_dir: Path, final_path: Path) -> None:
+        staged = work_dir / final_path.name
+        if staged.is_file():
+            os.replace(staged, final_path)
+            self.log(f"[{label}] Saved {final_path}\n")
+        elif not final_path.is_file():
+            raise RuntimeError(f"yt-dlp finished but produced no {final_path.suffix} file.")
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+    def _cleanup_cancelled_outputs(
+        self,
+        output_dir: Path,
+        name: str,
+        label: str,
+        existing_files: set[Path],
+        *,
+        keep_suffixes: frozenset[str] = frozenset(),
+    ) -> list[str]:
         removed: list[str] = []
         for path in sorted(self._matching_output_files(output_dir, name)):
-            if path in existing_files:
+            if path in existing_files or path.suffix.lower() in keep_suffixes:
                 continue
             try:
                 path.unlink()
@@ -201,7 +242,7 @@ class DownloadManager:
             except FileNotFoundError:
                 continue
             except OSError as exc:
-                self.log(f"[{name}] Failed to remove partial file {path.name}: {exc}\n")
+                self.log(f"[{label}] Failed to remove partial file {path.name}: {exc}\n")
         return removed
 
     def _queue_task_locked(self, task_id: str, output_dir: Path, output_format: str) -> bool:
@@ -233,7 +274,7 @@ class DownloadManager:
         proc = self.processes.get(task_id)
         if proc is not None and proc.poll() is None:
             proc.terminate()
-        self._log_locked(f"[{task.name}] Stop requested.\n")
+        self._log_locked(f"[{task.log_label}] Stop requested.\n")
         return True
 
     def _log_locked(self, text: str) -> None:
@@ -267,26 +308,29 @@ class DownloadManager:
             rows = [row for row in self.logs if row["seq"] > since_seq]
             return {"rows": rows, "last_seq": self.log_seq}
 
-    def add_task(self, url: str, name: str) -> dict:
+    def add_task(self, url: str, name: str, output_format: str | None = None) -> dict:
         url = url.strip()
         name = normalize_name(name)
         if not url or not name:
             raise ValueError("Link and video name are required.")
+        chosen_format = normalize_output_format(output_format)
 
         task_id = uuid.uuid4().hex[:10]
-        task = Task(id=task_id, url=url, name=name)
+        task = Task(id=task_id, url=url, name=name, output_format=chosen_format)
         with self.lock:
-            if self._find_task_by_name_locked(name) is not None:
-                raise ValueError("Output name already exists in the queue.")
+            if self._find_conflicting_task_locked(name, chosen_format) is not None:
+                raise ValueError(self._conflict_message(chosen_format))
             self.tasks[task_id] = task
             self.task_order.append(task_id)
         return task.to_json()
 
-    def edit_task(self, task_id: str, url: str, name: str) -> dict:
+    def edit_task(self, task_id: str, url: str, name: str, output_format: str | None = None) -> dict:
         url = url.strip()
         name = normalize_name(name)
         if not url or not name:
             raise ValueError("Link and video name are required.")
+        # None keeps the task's current format, so older clients that omit it can still edit.
+        chosen_format = normalize_output_format(output_format) if output_format is not None else None
 
         with self.lock:
             task = self.tasks.get(task_id)
@@ -294,10 +338,12 @@ class DownloadManager:
                 raise KeyError("Task not found.")
             if task.status == "Running":
                 raise RuntimeError("Cannot edit a running task.")
-            if self._find_task_by_name_locked(name, ignore_task_id=task_id) is not None:
-                raise ValueError("Output name already exists in the queue.")
+            next_format = chosen_format or task.output_format
+            if self._find_conflicting_task_locked(name, next_format, ignore_task_id=task_id) is not None:
+                raise ValueError(self._conflict_message(next_format))
             task.url = url
             task.name = name
+            task.output_format = next_format
             task.status = "Queued"
             task.progress = 0.0
             task.progress_text = ""
@@ -336,13 +382,12 @@ class DownloadManager:
             self.logs = []
             self.log_seq = 0
 
-    def start_downloads(self, output_dir: str, output_format: str) -> int:
+    def start_downloads(self, output_dir: str) -> int:
         if shutil.which("yt-dlp") is None:
             raise RuntimeError("yt-dlp not found. Install it first (example: brew install yt-dlp).")
 
         out_dir = Path(output_dir).expanduser().resolve()
         out_dir.mkdir(parents=True, exist_ok=True)
-        chosen_format = normalize_output_format(output_format)
 
         with self.lock:
             pending = [
@@ -354,22 +399,26 @@ class DownloadManager:
                 self._log_locked("No queued downloads found.\n")
                 return 0
 
-            self._log_locked(f"Starting {len(pending)} download(s), output format: {chosen_format}.\n")
+            format_counts: dict[str, int] = {}
+            for task_id in pending:
+                fmt = self.tasks[task_id].output_format
+                format_counts[fmt] = format_counts.get(fmt, 0) + 1
+            breakdown = ", ".join(f"{count} {fmt}" for fmt, count in format_counts.items())
+            self._log_locked(f"Starting {len(pending)} download(s): {breakdown}.\n")
 
             started = 0
             for task_id in pending:
-                if self._queue_task_locked(task_id, out_dir, chosen_format):
+                if self._queue_task_locked(task_id, out_dir, self.tasks[task_id].output_format):
                     started += 1
 
             return started
 
-    def start_task(self, task_id: str, output_dir: str, output_format: str) -> dict:
+    def start_task(self, task_id: str, output_dir: str) -> dict:
         if shutil.which("yt-dlp") is None:
             raise RuntimeError("yt-dlp not found. Install it first (example: brew install yt-dlp).")
 
         out_dir = Path(output_dir).expanduser().resolve()
         out_dir.mkdir(parents=True, exist_ok=True)
-        chosen_format = normalize_output_format(output_format)
 
         with self.lock:
             task = self.tasks.get(task_id)
@@ -378,9 +427,9 @@ class DownloadManager:
             if task.status not in {"Queued", "Failed", "Cancelled"}:
                 raise RuntimeError("Task is already running.")
 
-            if not self._queue_task_locked(task_id, out_dir, chosen_format):
+            if not self._queue_task_locked(task_id, out_dir, task.output_format):
                 raise RuntimeError("Task could not be started.")
-            self._log_locked(f"[{task.name}] Queued to start, output format: {chosen_format}.\n")
+            self._log_locked(f"[{task.log_label}] Queued to start, output format: {task.output_format}.\n")
             return task.to_json()
 
     def stop_task(self, task_id: str) -> dict:
@@ -392,9 +441,9 @@ class DownloadManager:
                 raise RuntimeError("Task is not running.")
             return task.to_json()
 
-    def _run_attempt(self, task_id: str, name: str, cmd: list[str]) -> tuple[int, bool, bool]:
+    def _run_attempt(self, task_id: str, label: str, cmd: list[str]) -> tuple[int, bool, bool]:
         cmd_text = " ".join(shlex.quote(part) for part in cmd)
-        self.log(f"\n[{name}] {cmd_text}\n")
+        self.log(f"\n[{label}] {cmd_text}\n")
 
         proc = subprocess.Popen(
             cmd,
@@ -434,7 +483,7 @@ class DownloadManager:
                             progress_task.progress_text = progress_text
             else:
                 last_progress_line = None
-            self.log(f"[{name}] {clean}\n")
+            self.log(f"[{label}] {clean}\n")
 
         return proc.wait(), needs_cookies, blocked
 
@@ -466,9 +515,18 @@ class DownloadManager:
                 return
             url = task.url
             name = task.name
+            label = task.log_label
 
-        existing_output_files = self._matching_output_files(output_dir, name)
-        output_template = str(output_dir / f"{name}.%(ext)s")
+        work_dir = output_dir
+        final_audio: Path | None = None
+        if output_format in AUDIO_OUTPUT_FORMATS:
+            # To extract audio, yt-dlp first fetches the source as NAME.<ext>. In the shared
+            # folder it would take a same-named NAME.mp4 as that source and delete it after
+            # extracting, so audio is staged in a private folder and only NAME.mp3 is moved out.
+            work_dir = output_dir / f".{name}.{output_format}.partial"
+            final_audio = output_dir / f"{name}.{output_format}"
+        existing_output_files = self._matching_output_files(work_dir, name)
+        output_template = str(work_dir / f"{name}.%(ext)s")
         cmd = [
             "yt-dlp",
             url,
@@ -477,11 +535,17 @@ class DownloadManager:
             "--extractor-args",
             "generic:impersonate=chrome",
         ]
-        if output_format != "original":
+        if output_format in AUDIO_OUTPUT_FORMATS:
+            cmd.extend(["-x", "--audio-format", output_format, "--audio-quality", "0"])
+        elif output_format != "original":
             cmd.extend(["--merge-output-format", output_format, "--remux-video", output_format])
 
         try:
-            code, needs_cookies, blocked = self._run_attempt(task_id, name, cmd)
+            if final_audio is not None and final_audio.exists():
+                self.log(f"[{label}] {final_audio.name} is already in the output folder; not downloading it again.\n")
+                code, needs_cookies, blocked = 0, False, False
+            else:
+                code, needs_cookies, blocked = self._run_attempt(task_id, label, cmd)
 
             # A bare 403 carries no "use --cookies" hint, so the escalation below has
             # to be triggered on the status code. But it is a long shot -- it only pays
@@ -491,7 +555,7 @@ class DownloadManager:
             cookies_are_a_long_shot = code != 0 and blocked and not needs_cookies
             if cookies_are_a_long_shot:
                 self.log(
-                    f"[{name}] The site's CDN refused the request (403) before reading the link. "
+                    f"[{label}] The site's CDN refused the request (403) before reading the link. "
                     "That is an edge/IP-level block, not a bad link. "
                     "Trying your browser's session cookies once, in case it holds a clearance cookie.\n"
                 )
@@ -501,7 +565,7 @@ class DownloadManager:
                 browsers = detect_cookie_browsers()
                 if not browsers:
                     self.log(
-                        f"[{name}] This link requires sign-in cookies, but no supported browser profile was found "
+                        f"[{label}] This link requires sign-in cookies, but no supported browser profile was found "
                         "(Chrome, Brave, Edge, Firefox, Safari). Sign in to the site in one of those browsers, then retry.\n"
                     )
                 attempted: list[str] = []
@@ -519,12 +583,12 @@ class DownloadManager:
                         else ""
                     )
                     self.log(
-                        f"[{name}] The site asks for sign-in cookies. "
+                        f"[{label}] The site asks for sign-in cookies. "
                         f"Retrying with cookies from {browser.capitalize()}{keychain_hint}.\n"
                     )
                     attempted.append(browser)
                     code, needs_cookies, blocked = self._run_attempt(
-                        task_id, name, cmd + ["--cookies-from-browser", browser]
+                        task_id, label, cmd + ["--cookies-from-browser", browser]
                     )
                     if code == 0 or not needs_cookies or cookies_are_a_long_shot:
                         break
@@ -532,7 +596,7 @@ class DownloadManager:
                     tried = ", ".join(browser.capitalize() for browser in attempted)
                     if blocked:
                         self.log(
-                            f"[{name}] Still refused by the CDN after trying cookies from: {tried}. "
+                            f"[{label}] Still refused by the CDN after trying cookies from: {tried}. "
                             "A clearance cookie is tied to the IP that earned it, so it only helps if "
                             "this machine is on the same connection as the browser. What actually works: "
                             "turn the VPN on, then re-grab a fresh link with the Grab .m3u8 bookmarklet "
@@ -540,15 +604,17 @@ class DownloadManager:
                         )
                     else:
                         self.log(
-                            f"[{name}] Still blocked after trying cookies from: {tried}. "
+                            f"[{label}] Still blocked after trying cookies from: {tried}. "
                             "Make sure you are signed in to the site in one of those browsers.\n"
                         )
 
             with self.lock:
                 was_cancelled = task_id in self.cancel_requested
             final_status = "Cancelled" if was_cancelled else ("Completed" if code == 0 else "Failed")
+            if final_status == "Completed" and final_audio is not None:
+                self._publish_staged_audio(label, work_dir, final_audio)
         except Exception as exc:  # pragma: no cover - defensive
-            self.log(f"[{name}] Error: {exc}\n")
+            self.log(f"[{label}] Error: {exc}\n")
             with self.lock:
                 was_cancelled = task_id in self.cancel_requested
             final_status = "Cancelled" if was_cancelled else "Failed"
@@ -573,15 +639,27 @@ class DownloadManager:
                 self.active_run.discard(task_id)
 
             if final_status == "Cancelled":
-                removed_files = self._cleanup_cancelled_outputs(output_dir, name, existing_output_files)
+                removed_files = self._cleanup_cancelled_outputs(
+                    work_dir,
+                    name,
+                    label,
+                    existing_output_files,
+                    # A same-named audio task may have finished NAME.mp3 here in the meantime.
+                    keep_suffixes=frozenset() if final_audio else AUDIO_SUFFIXES,
+                )
+                if final_audio is not None:
+                    try:
+                        work_dir.rmdir()
+                    except OSError:
+                        pass
 
             with self.lock:
                 task = self.tasks.get(task_id)
                 if removed_files:
-                    self._log_locked(f"[{name}] Removed partial files after interruption: {', '.join(removed_files)}\n")
+                    self._log_locked(f"[{label}] Removed partial files after interruption: {', '.join(removed_files)}\n")
                 if task is not None:
                     if final_status == "Completed":
-                        self._log_locked(f"[{task.name}] Removed from queue after success.\n")
+                        self._log_locked(f"[{task.log_label}] Removed from queue after success.\n")
                         self._remove_task_from_queue_locked(task_id)
                     elif final_status == "Cancelled" and should_remove_after_finish:
                         self._remove_task_from_queue_locked(task_id)
@@ -687,18 +765,13 @@ class AppHandler(BaseHTTPRequestHandler):
         try:
             payload = self._read_json()
             if path == "/api/tasks":
-                task = MANAGER.add_task(payload.get("url", ""), payload.get("name", ""))
+                task = MANAGER.add_task(payload.get("url", ""), payload.get("name", ""), payload.get("output_format"))
                 self._send_json({"task": task}, HTTPStatus.CREATED)
                 return
             if path.startswith("/api/tasks/") and path.endswith("/start"):
                 task_id = path.removeprefix("/api/tasks/").removesuffix("/start").strip("/")
                 output_dir = str(payload.get("output_dir", "")).strip() or DEFAULT_OUTPUT_DIR
-                output_format = normalize_output_format(payload.get("output_format"))
-                task = MANAGER.start_task(
-                    task_id,
-                    output_dir=output_dir,
-                    output_format=output_format,
-                )
+                task = MANAGER.start_task(task_id, output_dir=output_dir)
                 self._send_json({"task": task})
                 return
             if path.startswith("/api/tasks/") and path.endswith("/stop"):
@@ -723,8 +796,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/start":
                 output_dir = str(payload.get("output_dir", "")).strip() or DEFAULT_OUTPUT_DIR
-                output_format = normalize_output_format(payload.get("output_format"))
-                count = MANAGER.start_downloads(output_dir=output_dir, output_format=output_format)
+                count = MANAGER.start_downloads(output_dir=output_dir)
                 self._send_json({"started": count})
                 return
             if path == "/api/stop-all":
@@ -753,7 +825,9 @@ class AppHandler(BaseHTTPRequestHandler):
         task_id = path.rsplit("/", 1)[-1]
         try:
             payload = self._read_json()
-            task = MANAGER.edit_task(task_id, payload.get("url", ""), payload.get("name", ""))
+            task = MANAGER.edit_task(
+                task_id, payload.get("url", ""), payload.get("name", ""), payload.get("output_format")
+            )
             self._send_json({"task": task})
         except json.JSONDecodeError:
             self._send_json({"error": "Invalid JSON body."}, HTTPStatus.BAD_REQUEST)

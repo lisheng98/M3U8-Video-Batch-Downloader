@@ -51,9 +51,7 @@ const state = {
   taskLogs: new Map(), // task name -> array of lines
   defaultOutputDir: "",
   outputDirInitialized: false,
-  availableFormats: ["mp4", "mkv", "webm", "mov", "original"],
   defaultOutputFormat: "mp4",
-  outputFormatInitialized: false,
   urlHistory: loadHistory(HISTORY_KEYS.url),
   urlHistoryIndex: null,
   urlHistoryDraft: "",
@@ -73,7 +71,7 @@ const els = {
   settingsPanel: document.getElementById("settings-panel"),
   settingsDoneBtn: document.getElementById("settings-done-btn"),
   outputDir: document.getElementById("output-dir"),
-  outputFormat: document.getElementById("output-format"),
+  formatRadios: document.querySelectorAll('input[name="output-format"]'),
   url: document.getElementById("video-url"),
   name: document.getElementById("video-name"),
   nameHistoryList: document.getElementById("video-name-history"),
@@ -125,17 +123,15 @@ function escapeHtml(value) {
     .replace(/'/g, "&#39;");
 }
 
-function titleizeFormat(value) {
-  return value === "original" ? "Original (source)" : value.toUpperCase();
+function selectedFormat(groupName = "output-format") {
+  const checked = document.querySelector(`input[name="${groupName}"]:checked`);
+  return checked ? checked.value : state.defaultOutputFormat;
 }
 
-function renderOutputFormatOptions() {
-  const options = state.availableFormats
-    .map((fmt) => `<option value="${escapeHtml(fmt)}">${escapeHtml(titleizeFormat(fmt))}</option>`)
-    .join("");
-  els.outputFormat.innerHTML = options;
-  const selected = state.defaultOutputFormat || "mp4";
-  els.outputFormat.value = state.availableFormats.includes(selected) ? selected : state.availableFormats[0];
+function formatTagHtml(format) {
+  const value = String(format || state.defaultOutputFormat);
+  const kind = value === "mp3" ? " audio" : "";
+  return `<span class="fmt-tag${kind}" title="Output format">${escapeHtml(value.toUpperCase())}</span>`;
 }
 
 function renderNameHistoryOptions() {
@@ -234,6 +230,11 @@ function clampProgress(value) {
 
 // ----- Per-task log routing -----
 
+// Audio tasks log as "[name.mp3]" so they can share a name with a video task.
+function logKey(task) {
+  return task.log_label || task.name;
+}
+
 function taskLogLines(name) {
   if (!state.taskLogs.has(name)) state.taskLogs.set(name, []);
   return state.taskLogs.get(name);
@@ -262,7 +263,7 @@ function routeLogText(text) {
 }
 
 function registerTaskNames() {
-  for (const task of state.tasks) taskLogLines(task.name);
+  for (const task of state.tasks) taskLogLines(logKey(task));
 }
 
 // ----- Rendering -----
@@ -300,7 +301,10 @@ function cardHtml(task) {
     <div class="qcard${selected}" data-id="${task.id}">
       <div class="qcard-head">
         <strong>${escapeHtml(task.name)}</strong>
-        <span class="pill ${statusClass}">${escapeHtml(task.status)}</span>
+        <span class="qcard-tags">
+          ${formatTagHtml(task.output_format)}
+          <span class="pill ${statusClass}">${escapeHtml(task.status)}</span>
+        </span>
       </div>
       <div class="qcard-url">${escapeHtml(task.url)}</div>
       ${progressHtml}
@@ -360,8 +364,8 @@ function renderLogPane() {
   } else {
     const selected = getTaskById(state.selectedId);
     if (selected) {
-      const lines = state.taskLogs.get(selected.name) || [];
-      els.logTitle.textContent = selected.name;
+      const lines = state.taskLogs.get(logKey(selected)) || [];
+      els.logTitle.textContent = logKey(selected);
       changed = setLogText(lines.length ? lines.join("\n") : "No log output yet \u2014 press Start.");
       els.logLive.hidden = selected.status !== "Running";
     } else {
@@ -376,7 +380,7 @@ function renderLogPane() {
 
 function renderMeta() {
   els.metaDir.textContent = els.outputDir.value.trim() || state.defaultOutputDir || "~/Downloads";
-  els.metaFormat.textContent = titleizeFormat(els.outputFormat.value || state.defaultOutputFormat || "mp4");
+  els.metaFormat.textContent = selectedFormat().toUpperCase();
 }
 
 // ----- Server sync -----
@@ -390,16 +394,6 @@ async function refreshState() {
         els.outputDir.value = state.defaultOutputDir;
       }
       state.outputDirInitialized = true;
-    }
-    if (Array.isArray(data.output_formats) && data.output_formats.length > 0) {
-      state.availableFormats = data.output_formats;
-    }
-    if (typeof data.default_output_format === "string" && data.default_output_format) {
-      state.defaultOutputFormat = data.default_output_format;
-    }
-    if (!state.outputFormatInitialized || !els.outputFormat.value) {
-      renderOutputFormatOptions();
-      state.outputFormatInitialized = true;
     }
     state.tasks = data.tasks || [];
     registerTaskNames();
@@ -452,7 +446,6 @@ async function pollLogs() {
 function getDownloadSettings() {
   return {
     output_dir: els.outputDir.value.trim() || state.defaultOutputDir,
-    output_format: (els.outputFormat.value || state.defaultOutputFormat || "mp4").toLowerCase(),
   };
 }
 
@@ -464,7 +457,7 @@ async function addTask() {
     return;
   }
   try {
-    const data = await api("/api/tasks", "POST", { url, name });
+    const data = await api("/api/tasks", "POST", { url, name, output_format: selectedFormat() });
     pushHistory("url", url);
     pushHistory("name", name);
     state.urlHistoryIndex = null;
@@ -564,7 +557,7 @@ function currentLogText() {
   if (state.allMode) return state.globalLog;
   const selected = getTaskById(state.selectedId);
   if (!selected) return "";
-  return (state.taskLogs.get(selected.name) || []).join("\n");
+  return (state.taskLogs.get(logKey(selected)) || []).join("\n");
 }
 
 async function writeClipboard(text) {
@@ -622,8 +615,8 @@ async function clearLogs() {
     } else {
       const selected = getTaskById(state.selectedId);
       if (selected) {
-        state.taskLogs.set(selected.name, []);
-        setStatus(`Cleared log view for ${selected.name}.`);
+        state.taskLogs.set(logKey(selected), []);
+        setStatus(`Cleared log view for ${logKey(selected)}.`);
       }
     }
     renderLogPane();
@@ -647,6 +640,10 @@ function openEditModal(taskId) {
   state.editingTaskId = taskId;
   els.editUrl.value = task.url;
   els.editName.value = task.name;
+  const taskFormat = task.output_format || state.defaultOutputFormat;
+  document.querySelectorAll('input[name="edit-output-format"]').forEach((radio) => {
+    radio.checked = radio.value === taskFormat;
+  });
   els.editModal.hidden = false;
   els.editUrl.focus();
   setInputCursorToEnd(els.editUrl);
@@ -662,7 +659,11 @@ async function submitEditTask(event) {
     return;
   }
   try {
-    await api(`/api/tasks/${state.editingTaskId}`, "PATCH", { url: nextUrl, name: nextName });
+    await api(`/api/tasks/${state.editingTaskId}`, "PATCH", {
+      url: nextUrl,
+      name: nextName,
+      output_format: selectedFormat("edit-output-format"),
+    });
     closeEditModal();
     setStatus("Task updated.");
     await refreshState();
@@ -684,7 +685,7 @@ function bindEvents() {
     renderMeta();
   });
   els.outputDir.addEventListener("input", renderMeta);
-  els.outputFormat.addEventListener("change", renderMeta);
+  els.formatRadios.forEach((radio) => radio.addEventListener("change", renderMeta));
 
   els.addBtn.addEventListener("click", addTask);
   els.startBtn.addEventListener("click", startDownloads);

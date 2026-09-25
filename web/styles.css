@@ -16,6 +16,9 @@
   --err-soft: oklch(0.95 0.03 25);
   --warn: oklch(0.55 0.1 60);
   --warn-soft: oklch(0.95 0.03 80);
+  --audio: oklch(0.48 0.15 300);
+  --audio-line: oklch(0.82 0.06 300);
+  --audio-soft: oklch(0.96 0.02 300);
   --log-bg: oklch(0.2 0.015 250);
   --log-line: oklch(0.3 0.02 250);
   --log-text: oklch(0.85 0.01 250);
@@ -135,7 +138,8 @@ button.linklike:hover:not(:disabled) { color: var(--text-mid); background: none;
 .settings-field.grow { flex: 1; max-width: 420px; }
 
 .settings label,
-.modal-form label {
+.modal-form label,
+.modal-form .field-label {
   display: block;
   font-size: 10px; font-weight: 700;
   text-transform: uppercase; letter-spacing: 0.08em;
@@ -174,6 +178,20 @@ input:focus, select:focus {
 .addbar #video-url { flex: 1; }
 .addbar #video-name { width: 480px; }
 .addbar .divider { width: 1px; height: 24px; background: var(--line); margin: 0 4px; }
+.format-choice {
+  display: flex; align-items: center; gap: 10px;
+  font-size: 12px; color: var(--text-mid);
+  white-space: nowrap;
+}
+.format-choice label { display: flex; align-items: center; gap: 4px; cursor: pointer; }
+.format-choice input { margin: 0; padding: 0; accent-color: var(--accent); cursor: pointer; }
+.modal-form .format-choice { padding: 4px 0; font-size: 13px; }
+.modal-form .format-choice label {
+  display: flex; margin: 0;
+  font-size: 13px; font-weight: 400;
+  text-transform: none; letter-spacing: 0;
+  color: var(--text-mid);
+}
 
 /* Status toast */
 .status {
@@ -242,6 +260,17 @@ input:focus, select:focus {
 
 .qcard-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
 .qcard-head strong { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.qcard-tags { display: flex; align-items: center; gap: 6px; flex: none; }
+
+.fmt-tag {
+  font-family: var(--mono); font-size: 10px; font-weight: 700;
+  letter-spacing: 0.04em;
+  border: 1px solid var(--line-soft); border-radius: 4px;
+  padding: 1px 5px;
+  color: var(--text-dim); background: var(--surface);
+}
+.fmt-tag.audio { color: var(--audio); border-color: var(--audio-line); background: var(--audio-soft); }
 
 .pill {
   font-size: 11px; font-weight: 600;

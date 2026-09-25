@@ -26,10 +26,6 @@
       <label for="output-dir">Output folder</label>
       <input type="text" id="output-dir" class="mono" placeholder="~/Downloads" autocomplete="off">
     </div>
-    <div class="settings-field">
-      <label for="output-format">Output format</label>
-      <select id="output-format"></select>
-    </div>
     <button type="button" id="settings-done-btn">Done</button>
   </section>
 
@@ -39,6 +35,11 @@
     <input type="text" id="video-url" placeholder="Paste .m3u8 link&#8230;" autocomplete="off" spellcheck="false">
     <input type="text" id="video-name" placeholder="video_name" autocomplete="off" spellcheck="false" list="video-name-history">
     <datalist id="video-name-history"></datalist>
+    <div class="format-choice" role="radiogroup" aria-label="Format for new tasks">
+      <span>Format:</span>
+      <label><input type="radio" name="output-format" value="mp4" checked> MP4</label>
+      <label><input type="radio" name="output-format" value="mp3"> MP3</label>
+    </div>
     <button type="button" id="add-task-btn" class="primary">Add</button>
     <div class="divider"></div>
     <button type="button" id="start-btn" class="outline">Start all</button>
@@ -87,6 +88,13 @@
         <div>
           <label for="edit-video-name">Video name</label>
           <input type="text" id="edit-video-name" placeholder="video_name" autocomplete="off" spellcheck="false">
+        </div>
+        <div>
+          <span class="field-label">Format</span>
+          <div class="format-choice" role="radiogroup" aria-label="Format">
+            <label><input type="radio" name="edit-output-format" value="mp4"> MP4</label>
+            <label><input type="radio" name="edit-output-format" value="mp3"> MP3</label>
+          </div>
         </div>
         <div class="modal-actions">
           <button type="button" id="edit-modal-cancel-btn">Cancel</button>
