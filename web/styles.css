@@ -25,6 +25,9 @@
 
 * { box-sizing: border-box; }
 
+/* Class rules like `.settings { display: flex }` would otherwise beat the hidden attribute. */
+[hidden] { display: none !important; }
+
 body {
   margin: 0;
   height: 100vh;
@@ -339,7 +342,6 @@ pre#logs {
 }
 
 /* Modal */
-.modal[hidden] { display: none; }
 .modal { position: fixed; inset: 0; z-index: 10; display: grid; place-items: center; padding: 22px; }
 .modal-backdrop { position: absolute; inset: 0; background: oklch(0.2 0.02 250 / 0.5); }
 
